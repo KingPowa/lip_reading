@@ -11,7 +11,7 @@ FACE_LANDMARKER_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/latest/face_landmarker.task"
 )
-WHISPER_MODEL_NAME = "small"
+WHISPER_MODEL_NAME = "large-v3"
 SPEAKER_MODEL_DIRECTORY = "speaker-ecapa"
 SPEAKER_MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
 

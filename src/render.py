@@ -202,7 +202,7 @@ def render_video(
                 break
             timestamp = timestamps[frame_index] if frame_index < len(timestamps) else frame_index / frame_rate
             active_events = _events_at(events, timestamp)
-            active_tracks = {event.face_track: event for event in active_events if event.face_track}
+            active_tracks = _active_tracks(active_events)
             for track in tracks:
                 event = active_tracks.get(track.track_id)
                 if event is None:
@@ -234,6 +234,17 @@ def _vtt_timestamp(seconds: float) -> str:
 
 def _events_at(events: list[CaptionEvent], timestamp: float) -> list[CaptionEvent]:
     return [event for event in events if event.start <= timestamp < event.end]
+
+
+def _active_tracks(events: list[CaptionEvent]) -> dict[str, CaptionEvent]:
+    strongest_events: dict[str, CaptionEvent] = {}
+    for event in events:
+        if event.face_track is None:
+            continue
+        existing = strongest_events.get(event.speaker)
+        if existing is None or event.confidence > existing.confidence:
+            strongest_events[event.speaker] = event
+    return {event.face_track: event for event in strongest_events.values() if event.face_track}
 
 
 def _draw_face(image: object, box: object, event: CaptionEvent) -> None:

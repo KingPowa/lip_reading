@@ -1,5 +1,6 @@
 """Combine voice turns, words, and face activity into caption events."""
 
+import re
 from collections import defaultdict
 from dataclasses import replace
 
@@ -40,6 +41,9 @@ def associate_speakers(
             events.append(_unassigned_event(turn, words, bool(scores)))
             continue
         label = _speaker_label(turn.speaker_id, selected_track, voice_labels, track_labels)
+        if label is None:
+            events.append(_unassigned_event(turn, words, True))
+            continue
         events.append(
             CaptionEvent(
                 turn.start,
@@ -51,7 +55,7 @@ def associate_speakers(
                 "visible",
             )
         )
-    return _mark_overlaps(events)
+    return _disambiguate_overlaps(events)
 
 
 def _activity_scores(
@@ -87,11 +91,12 @@ def _speaker_label(
     track_id: str,
     voice_labels: dict[str, str],
     track_labels: dict[str, str],
-) -> str:
+) -> str | None:
     existing_voice_label = voice_labels.get(voice_id)
-    if existing_voice_label:
-        return existing_voice_label
-    label = track_labels.get(track_id, f"Person {len(track_labels) + 1}")
+    existing_track_label = track_labels.get(track_id)
+    if existing_voice_label and existing_track_label and existing_voice_label != existing_track_label:
+        return None
+    label = existing_voice_label or existing_track_label or f"Person {len(track_labels) + 1}"
     voice_labels[voice_id] = label
     track_labels[track_id] = label
     return label
@@ -113,23 +118,43 @@ def _turn_text(turn: SpeakerTurn, words: list[Word]) -> str:
     text = " ".join(
         word.text for word in words if turn.start <= (word.start + word.end) / 2 <= turn.end
     ).strip()
-    return text or DEFAULT_SPEECH_TEXT
+    return re.sub(r"(\w)\s+(['’])\s*(\w)", r"\1\2\3", text) or DEFAULT_SPEECH_TEXT
 
 
-def _mark_overlaps(events: list[CaptionEvent]) -> list[CaptionEvent]:
-    overlapping_indices = {
+def _disambiguate_overlaps(events: list[CaptionEvent]) -> list[CaptionEvent]:
+    ambiguous_indices = {
         index
         for index, event in enumerate(events)
         if event.state == "visible"
         and any(
             other_index != index
+            and other.speaker == event.speaker
             and other.state == "visible"
+            and event.start < other.end
+            and event.end > other.start
+            and (other.confidence, -other_index) > (event.confidence, -index)
+            for other_index, other in enumerate(events)
+        )
+    }
+    overlapping_indices = {
+        index
+        for index, event in enumerate(events)
+        if event.state == "visible"
+        and index not in ambiguous_indices
+        and any(
+            other_index != index
+            and other.state == "visible"
+            and other_index not in ambiguous_indices
             and event.start < other.end
             and event.end > other.start
             for other_index, other in enumerate(events)
         )
     }
     return [
-        replace(event, state="overlapping") if index in overlapping_indices else event
+        replace(event, speaker=UNCERTAIN_SPEAKER, face_track=None, state="uncertain")
+        if index in ambiguous_indices
+        else replace(event, state="overlapping")
+        if index in overlapping_indices
+        else event
         for index, event in enumerate(events)
     ]

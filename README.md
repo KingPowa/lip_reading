@@ -50,16 +50,16 @@ Useful options:
 uv run --python .venv/bin/python -m src.main INPUT.mp4 --language it
 
 # Use a faster, less accurate model for a quick check.
-uv run --python .venv/bin/python -m src.main INPUT.mp4 --whisper-model base
+uv run --python .venv/bin/python -m src.main INPUT.mp4 --whisper-model small
 
-# Use a larger model when accuracy matters more than runtime.
+# Use the middle ground for a faster, still more accurate run.
 uv run --python .venv/bin/python -m src.main INPUT.mp4 --whisper-model medium
 
 # See detailed progress messages.
 uv run --python .venv/bin/python -m src.main INPUT.mp4 --verbose
 ```
 
-`small` is the default Whisper model. It is a deliberate accuracy/runtime balance for multilingual speech. For Italian, pass `--language it` to avoid automatic language detection. `medium` can improve difficult audio, but needs substantially more memory and time.
+`large-v3` is the default Whisper model because the supplied Italian speech still contains word-level errors with `small` and `medium`. For Italian, pass `--language it` to avoid automatic language detection. Use `small` or `medium` for faster review runs.
 
 ## Outputs
 
@@ -90,13 +90,15 @@ video
 
 For each voice turn, the association step picks a face only when its time-weighted Light-ASD score clears both a minimum confidence threshold and the runner-up margin. If the evidence is weak, the result is deliberately labelled `uncertain`; if no face is visible, it is `off_screen`. This is safer than drawing a confident box around the wrong person.
 
+A face track cannot be assigned two person labels. If overlapping input would assign two boxes to the same person, the lower-confidence event is marked `uncertain`, so the rendered video has one highlight per person.
+
 Only the face associated with speech at the current timestamp is drawn. Faces that are merely visible do not receive a second, neutral box.
 
 ## Improving a result
 
 Use this quick triage order:
 
-1. **Words are wrong:** use `--language it` for Italian, then try `--whisper-model medium`. Check that the source audio is clear and not dominated by music or applause.
+1. **Words are wrong:** use `--language it` for Italian. `large-v3` is already the default; use `small` or `medium` only when faster processing matters more than transcription accuracy. Check that the source audio is clear and not dominated by music or applause.
 2. **Wrong person is highlighted:** inspect `faces.json` and `events.json` at the same timestamp. The pipeline only evaluates the eight largest face tracks, which keeps local processing practical but can miss a small or distant speaker.
 3. **No person is highlighted:** this is usually intentional `uncertain` or `off_screen` output. Check whether the speaker’s face is actually visible.
 4. **Captions look cut off:** rerun with the current version. Captions are wrapped using their actual rendered width, not an approximate character count.
