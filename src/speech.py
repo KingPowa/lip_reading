@@ -4,6 +4,7 @@ import json
 import logging
 import wave
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,8 @@ def transcribe_speech(
     model_name: str,
     model_directory: Path,
     language: str | None = None,
+    model: object | None = None,
+    word_timestamps: bool = True,
 ) -> tuple[list[SpeakerTurn], list[Word]]:
     """Transcribe normalized audio with local Whisper word timestamps.
 
@@ -42,19 +45,13 @@ def transcribe_speech(
     Raises:
         RuntimeError: If Whisper cannot load or transcribe the audio.
     """
-    try:
-        import whisper
-    except ImportError as error:
-        raise RuntimeError("Whisper is not installed") from error
-
-    model_directory.mkdir(parents=True, exist_ok=True)
-    LOGGER.info("loading Whisper model %s", model_name)
-    model = whisper.load_model(model_name, download_root=str(model_directory))
+    model = model or load_transcription_model(model_name, model_directory)
     LOGGER.info("transcribing audio with Whisper")
     result = model.transcribe(
         str(audio_path),
-        word_timestamps=True,
-        language=language,
+        word_timestamps=word_timestamps,
+        language=language.lower() if language else None,
+        task="transcribe",
         fp16=False,
         verbose=False,
     )
@@ -80,7 +77,24 @@ def transcribe_speech(
     return turns, words
 
 
-def diarize_turns(audio_path: Path, turns: list[SpeakerTurn], model_directory: Path) -> list[SpeakerTurn]:
+def load_transcription_model(model_name: str, model_directory: Path) -> object:
+    """Load one local Whisper model for reusable batch or stream transcription."""
+    try:
+        import whisper
+    except ImportError as error:
+        raise RuntimeError("Whisper is not installed") from error
+
+    model_directory.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("loading Whisper model %s", model_name)
+    return whisper.load_model(model_name, download_root=str(model_directory))
+
+
+def diarize_turns(
+    audio_path: Path,
+    turns: list[SpeakerTurn],
+    model_directory: Path,
+    centroids: list[np.ndarray] | None = None,
+) -> list[SpeakerTurn]:
     """Assign stable anonymous speaker IDs to Whisper turns using ECAPA embeddings.
 
     Args:
@@ -98,7 +112,7 @@ def diarize_turns(audio_path: Path, turns: list[SpeakerTurn], model_directory: P
         return []
     samples, sample_rate = _audio_samples(audio_path)
     classifier = _speaker_classifier(model_directory / SPEAKER_MODEL_DIRECTORY)
-    centroids: list[np.ndarray] = []
+    centroids = centroids if centroids is not None else []
     labeled_turns: list[SpeakerTurn] = []
     previous_speaker_id = FIRST_SPEAKER_ID
     for turn in turns:
@@ -142,6 +156,7 @@ def _audio_samples(audio_path: Path) -> tuple[np.ndarray, int]:
     return samples / np.iinfo(np.int16).max, sample_rate
 
 
+@lru_cache
 def _speaker_classifier(model_directory: Path):
     try:
         from speechbrain.inference.classifiers import EncoderClassifier

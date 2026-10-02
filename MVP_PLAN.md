@@ -2,7 +2,8 @@
 
 ## Goal
 
-Process one prerecorded video with embedded audio and produce:
+Process one prerecorded video with embedded audio, or a camera recording in
+short browser-captured clips, and produce:
 
 ```text
 input.mp4
@@ -27,10 +28,13 @@ cross-video recognition are outside the MVP.
 - Prefix captions with the corresponding speaker label.
 - Represent off-screen or uncertain speakers without guessing.
 - Highlight multiple people during overlapping speech when detected.
+- Capture a camera and microphone through a local browser page.
+- Continuously attribute speech in short camera windows while the user is speaking.
+- Keep the camera preview live while showing colour-matched, hoverable body highlights and a
+  collapsible transcript panel; never replay recognised clips.
 
 ### Excluded
 
-- Webcam and live streaming.
 - Real-world identity recognition.
 - Cross-video identity memory.
 - Mobile applications and user accounts.
@@ -43,7 +47,7 @@ cross-video recognition are outside the MVP.
 
 ```text
                      +-- Whisper ------- words + timestamps
-Video -> normalization+-- pyannote ------ voice clusters + turns
+Video -> normalization+-- ECAPA --------- voice clusters + turns
                      +-- face tracking -- visible face tracks
                                             |
                                       Light-ASD scores
@@ -64,7 +68,7 @@ numbers alone.
 | Media preparation | Validate video, extract 16 kHz mono audio, normalize frames, and preserve timestamps | FFmpeg |
 | Face tracking | Detect faces and maintain temporary IDs across consecutive frames | MediaPipe and simple intersection-over-union tracking |
 | Transcription | Produce words with start and end timestamps | Whisper |
-| Voice diarization | Estimate distinct voices and their speaking intervals | pyannote `speaker-diarization-community-1` |
+| Voice diarization | Estimate distinct voices and their speaking intervals | SpeechBrain ECAPA embeddings |
 | Active-speaker detection | Score whether each visible face is speaking | Light-ASD |
 | Association | Connect voice clusters, face tracks, and words | Project code |
 | Rendering | Draw labels and highlights and write named captions | OpenCV and FFmpeg |
@@ -113,6 +117,7 @@ The final event format should be:
   "end": 14.7,
   "speaker": "Person 2",
   "faceTrack": "face-7",
+  "color": "#fb7185",
   "text": "We can start the presentation.",
   "confidence": 0.91,
   "state": "visible"
@@ -146,17 +151,18 @@ For each diarized speaker turn:
 The two thresholds belong in one configuration file because they will need
 tuning against real videos.
 
-For simultaneous speech, use pyannote's overlap-aware output instead of its
-exclusive diarization output. Multiple faces may then be highlighted. Exact
-transcription of overlapping speech remains a known MVP limitation.
+Overlapping visible turns remain separately highlighted when their independently
+clustered speech intervals overlap. Exact transcription of two people talking
+at once remains a known MVP limitation.
 
 ## Rendering rules
 
 For each frame:
 
-- Interpolate the active face's bounding box from its track.
-- Draw a thick, high-contrast border.
-- Add a speaking icon and `Person N` label.
+- Interpolate the active face's bounding box and derive a clipped upper-body box.
+- Draw a semi-transparent, high-contrast upper-body highlight.
+- Assign each `Person N` a stable display colour; use it for the highlight and caption text.
+- Add a speaking label as well as colour.
 - Do not communicate speaker state through color alone.
 - Use a neutral or absent border for non-speaking faces.
 - Show `Off-screen speaker` when speech cannot be mapped to a visible face.
@@ -175,9 +181,12 @@ lip-reading/
 |-- pyproject.toml
 |-- src/
 |   |-- main.py          # command-line entry point and orchestration
+|   |-- live.py          # local camera server and shared recognizer
+|   |-- live_view.py     # browser camera and colour-matched overlays
+|   |-- colors.py        # stable anonymous-speaker display colours
 |   |-- media.py         # FFmpeg input/output and timestamps
 |   |-- vision.py        # face detection and tracking
-|   |-- speech.py        # Whisper and pyannote execution
+|   |-- speech.py        # Whisper and ECAPA voice clustering
 |   |-- association.py   # active-speaker and identity assignment
 |   `-- render.py        # video, VTT, and JSON output
 |-- tests/
@@ -186,14 +195,14 @@ lip-reading/
     `-- README.md
 ```
 
-Do not add a web server, database, Docker setup, plugin system, or abstract
-model interfaces to the MVP.
+The local browser server is part of the camera workflow. Do not add a database,
+Docker setup, plugin system, or abstract model interfaces to the MVP.
 
 ## Implementation milestones
 
 ### 1. Environment and vertical spike
 
-- Install FFmpeg, PyTorch, MediaPipe, Whisper, pyannote, and Light-ASD.
+- Install FFmpeg, PyTorch, MediaPipe, Whisper, SpeechBrain, and Light-ASD.
 - Confirm that each pretrained model runs independently on a short video.
 - Verify GPU use when available and CPU fallback where supported.
 - Resolve dependency compatibility before adding project abstractions.
@@ -231,7 +240,7 @@ shot.
 ### 4. Speech analysis
 
 - Run Whisper with word timestamps.
-- Run pyannote diarization.
+- Run ECAPA voice clustering.
 - Save both normalized outputs as intermediate JSON files.
 
 Done when the system produces timed words and stable anonymous speaker
@@ -250,7 +259,7 @@ speakers take turns.
 
 ### 6. Output generation
 
-- Draw active-speaker highlights.
+- Draw colour-matched upper-body active-speaker highlights.
 - Add speaker-labelled captions.
 - Generate VTT and event JSON.
 - Remux the untouched original audio into the rendered video.
@@ -286,7 +295,7 @@ The MVP is complete when:
 
 - One MP4 command produces all three output files.
 - The same voice retains the same `Person N` label throughout the video.
-- The currently speaking visible person is highlighted.
+- The currently speaking visible person has a colour-matched upper-body highlight and caption.
 - Turn changes update the highlight correctly.
 - Two simultaneous visible speakers can both be highlighted.
 - Off-screen speech does not highlight an unrelated face.
@@ -299,6 +308,5 @@ The MVP is complete when:
 
 ## Deferred work
 
-Add live streaming only after the offline association is demonstrably accurate.
 Add biometric identity only if stable real-world names are required and consent,
 retention, encryption, and deletion requirements have been defined.

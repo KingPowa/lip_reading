@@ -10,16 +10,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from .colors import speaker_color_bgr
 from .config import CAPTION_FONT_PATH, CAPTION_FONT_SIZE, CAPTION_HORIZONTAL_MARGIN, CAPTION_LINE_HEIGHT
 from .contracts import CaptionEvent, FaceTrack
 from .media import video_presentation_timestamps
-from .vision import box_at
+from .vision import body_box, box_at
 
 
 LOGGER = logging.getLogger(__name__)
-ACTIVE_COLOR = (0, 220, 0)
-CAPTION_COLOR = (255, 255, 255)
 CAPTION_BACKGROUND = (0, 0, 0)
+BODY_HIGHLIGHT_OPACITY = 0.20
 
 VIEWER_STYLE = """
 <style>
@@ -29,7 +29,7 @@ h1 { font-size: 1.25rem; grid-column: 1 / -1; margin: 0; }
 #player { position: relative; }
 video { display: block; max-width: 100%; width: 100%; }
 #faces { inset: 0; pointer-events: none; position: absolute; }
-.face { background: transparent; border: 4px solid #35d07f; box-sizing: border-box; cursor: help; pointer-events: auto; position: absolute; }
+.speaker { background: color-mix(in srgb, var(--speaker-color) 22%, transparent); border: 4px solid var(--speaker-color); box-sizing: border-box; cursor: help; pointer-events: auto; position: absolute; }
 #transcript { background: #1f2937; border-radius: 8px; max-height: 75vh; overflow: auto; padding: 12px; }
 #transcript button { background: none; border: 0; color: inherit; cursor: pointer; display: block; font: inherit; padding: 10px; text-align: left; width: 100%; }
 #transcript button.active { background: #164e63; border-radius: 6px; }
@@ -46,6 +46,7 @@ const tracks = new Map(data.tracks.map((track) => [track.track_id, track]));
 const transcriptButtons = data.events.map((event) => {
   const button = document.createElement("button");
   button.textContent = `${formatTime(event.start)} — ${event.speaker}: ${event.text}`;
+  button.style.color = event.color;
   button.onclick = () => { video.currentTime = event.start; video.play(); };
   transcript.append(button);
   return button;
@@ -66,10 +67,8 @@ function boxAt(track, timestamp) {
   }
   const span = after.timestamp - before.timestamp;
   const fraction = span ? (timestamp - before.timestamp) / span : 0;
-  return ["x", "y", "width", "height"].reduce((result, key) => {
-    result[key] = before[key] + (after[key] - before[key]) * fraction;
-    return result;
-  }, {});
+  const interpolate = (first, second) => Object.fromEntries(["x", "y", "width", "height"].map((key) => [key, first[key] + (second[key] - first[key]) * fraction]));
+  return { ...interpolate(before, after), bodyBox: interpolate(before.bodyBox, after.bodyBox) };
 }
 
 function render() {
@@ -79,11 +78,12 @@ function render() {
     const box = boxAt(tracks.get(event.faceTrack), video.currentTime);
     if (!box) return;
     const face = document.createElement("button");
-    face.className = "face";
+    face.className = "speaker";
     face.title = `${event.speaker}: ${event.text}`;
+    face.style.setProperty("--speaker-color", event.color);
     Object.assign(face.style, {
-      left: `${100 * box.x / data.width}%`, top: `${100 * box.y / data.height}%`,
-      width: `${100 * box.width / data.width}%`, height: `${100 * box.height / data.height}%`,
+      left: `${100 * box.bodyBox.x / data.width}%`, top: `${100 * box.bodyBox.y / data.height}%`,
+      width: `${100 * box.bodyBox.width / data.width}%`, height: `${100 * box.bodyBox.height / data.height}%`,
     });
     faceLayer.append(face);
   });
@@ -139,11 +139,7 @@ def write_viewer(
     payload = {
         "width": width,
         "height": height,
-        "tracks": [
-            track.__dict__ | {"boxes": [box.__dict__ for box in track.boxes]}
-            for track in tracks
-            if track.track_id in active_track_ids
-        ],
+        "tracks": [track for track in track_payloads(tracks, width, height) if track["track_id"] in active_track_ids],
         "events": [event.as_json() for event in events],
     }
     page = "\n".join(
@@ -210,7 +206,7 @@ def render_video(
                 box = box_at(track, timestamp)
                 if box is None:
                     continue
-                _draw_face(image, box, event)
+                _draw_speaker(image, box, event)
             _draw_captions(image, active_events)
             writer.write(image)
             frame_index += 1
@@ -247,15 +243,42 @@ def _active_tracks(events: list[CaptionEvent]) -> dict[str, CaptionEvent]:
     return {event.face_track: event for event in strongest_events.values() if event.face_track}
 
 
-def _draw_face(image: object, box: object, event: CaptionEvent) -> None:
-    cv2.rectangle(image, (box.x, box.y), (box.x + box.width, box.y + box.height), ACTIVE_COLOR, 4)
+def track_payloads(tracks: list[FaceTrack], width: int, height: int) -> list[dict[str, object]]:
+    """Serialize face tracks with lightweight estimated upper-body rectangles."""
+    return [track.__dict__ | {"boxes": [_box_payload(box, width, height) for box in track.boxes]} for track in tracks]
+
+
+def _box_payload(box: object, width: int, height: int) -> dict[str, object]:
+    return box.__dict__ | {"bodyBox": body_box(box, width, height).__dict__}
+
+
+def _draw_speaker(image: object, box: object, event: CaptionEvent) -> None:
+    height, width = image.shape[:2]
+    estimated_body = body_box(box, width, height)
+    color = speaker_color_bgr(event.speaker)
+    overlay = image.copy()
+    cv2.rectangle(
+        overlay,
+        (estimated_body.x, estimated_body.y),
+        (estimated_body.x + estimated_body.width, estimated_body.y + estimated_body.height),
+        color,
+        -1,
+    )
+    cv2.addWeighted(overlay, BODY_HIGHLIGHT_OPACITY, image, 1 - BODY_HIGHLIGHT_OPACITY, 0, image)
+    cv2.rectangle(
+        image,
+        (estimated_body.x, estimated_body.y),
+        (estimated_body.x + estimated_body.width, estimated_body.y + estimated_body.height),
+        color,
+        4,
+    )
     cv2.putText(
         image,
         f"SPEAKING - {event.speaker}",
         (box.x, max(24, box.y - 8)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
-        ACTIVE_COLOR,
+        color,
         2,
     )
 
@@ -266,7 +289,7 @@ def _draw_captions(image: object, events: list[CaptionEvent]) -> None:
     height, width = image.shape[:2]
     maximum_width = width - 2 * CAPTION_HORIZONTAL_MARGIN
     lines = [
-        line
+        (line, speaker_color_bgr(event.speaker))
         for event in events
         for line in _caption_lines(f"{event.speaker}: {event.text}", maximum_width)
     ]
@@ -274,11 +297,11 @@ def _draw_captions(image: object, events: list[CaptionEvent]) -> None:
     cv2.rectangle(image, (0, top), (width, height), CAPTION_BACKGROUND, -1)
     caption_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     caption_drawer = ImageDraw.Draw(caption_image)
-    for index, line in enumerate(lines):
+    for index, (line, color) in enumerate(lines):
         caption_drawer.text(
             (CAPTION_HORIZONTAL_MARGIN, top + CAPTION_LINE_HEIGHT * index),
             line,
-            fill=CAPTION_COLOR,
+            fill=color[::-1],
             font=_caption_font(),
         )
     image[:] = cv2.cvtColor(np.asarray(caption_image), cv2.COLOR_RGB2BGR)

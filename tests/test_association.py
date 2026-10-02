@@ -56,6 +56,34 @@ class AssociationTest(unittest.TestCase):
         events = associate_speakers(turns, words, tracks, activities)
         self.assertEqual([event.speaker for event in events], ["Person 1", "Person 1"])
 
+    def test_voice_label_stays_stable_across_live_windows(self) -> None:
+        labels: dict[str, str] = {}
+        first = associate_speakers(
+            [SpeakerTurn("SPEAKER_00", 0.0, 1.0, 0.9)],
+            [Word("hello", 0.1, 0.8, 0.9)],
+            [FaceTrack("face-1", 0.0, 1.0, [FaceBox(0.0, 0, 0, 10, 10)])],
+            [FaceActivity("face-1", 0.0, 1.0, 0.9)],
+            labels,
+        )
+        second = associate_speakers(
+            [SpeakerTurn("SPEAKER_00", 0.0, 1.0, 0.9)],
+            [Word("again", 0.1, 0.8, 0.9)],
+            [FaceTrack("face-2", 0.0, 1.0, [FaceBox(0.0, 20, 0, 10, 10)])],
+            [FaceActivity("face-2", 0.0, 1.0, 0.9)],
+            labels,
+        )
+        self.assertEqual([first[0].speaker, second[0].speaker], ["Person 1", "Person 1"])
+
+    def test_off_screen_speech_keeps_its_text_without_a_highlight(self) -> None:
+        events = associate_speakers(
+            [SpeakerTurn("SPEAKER_00", 0.0, 1.0, 0.9)],
+            [Word("hello", 0.1, 0.8, 0.9)],
+            [],
+            [],
+        )
+        self.assertEqual(events[0].state, "off_screen")
+        self.assertEqual(events[0].text, "hello")
+
     def test_overlapping_visible_turns_remain_separate_active_speakers(self) -> None:
         tracks = [
             FaceTrack("face-1", 0.0, 2.0, [FaceBox(0.0, 0, 0, 10, 10)]),

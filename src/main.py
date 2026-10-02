@@ -3,18 +3,26 @@
 import argparse
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from .association import associate_speakers
 from .config import (
     FACE_LANDMARKER_FILENAME,
     LIGHT_ASD_FILENAME,
+    MAXIMUM_ACTIVITY_TRACKS,
+    MAXIMUM_LIVE_ACTIVITY_TRACKS,
+    MINIMUM_LIVE_FACE_DETECTIONS,
+    MINIMUM_LIVE_TRACK_DURATION_SECONDS,
+    MINIMUM_TRACK_DETECTIONS,
+    MINIMUM_TRACK_DURATION_SECONDS,
     MODEL_DIRECTORY,
     WHISPER_MODEL_NAME,
 )
 from .light_asd import score_face_activity
-from .media import MediaError, extract_audio, inspect_media, read_video_frames
-from .render import render_video, write_events, write_viewer, write_vtt
+from .contracts import CaptionEvent, FaceTrack, SpeakerTurn, Word
+from .media import MediaError, MediaInfo, extract_audio, inspect_media, read_video_frames
+from .render import render_video, track_payloads, write_events, write_viewer, write_vtt
 from .speech import diarize_turns, transcribe_speech, write_speech_json
 from .vision import analyze_faces
 
@@ -61,22 +69,11 @@ def run(
         MediaError: If the source does not contain usable video and audio.
         RuntimeError: If local model inference or rendering fails.
     """
-    LOGGER.info("inspecting input %s", input_path)
-    info = inspect_media(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_path = extract_audio(input_path, output_dir / "audio.wav")
-    frames = read_video_frames(input_path)
-    LOGGER.info("decoded %d frames over %.2f seconds", len(frames), info.duration)
-    turns, words = transcribe_speech(audio_path, whisper_model, model_directory / "whisper", language)
-    turns = diarize_turns(audio_path, turns, model_directory)
-    tracks = analyze_faces(frames, model_directory / FACE_LANDMARKER_FILENAME)
-    activities = score_face_activity(
-        audio_path,
-        frames,
-        tracks,
-        model_directory / LIGHT_ASD_FILENAME,
+    info, tracks, events, turns, words = recognize(
+        input_path, audio_path, whisper_model, language, model_directory
     )
-    events = associate_speakers(turns, words, tracks, activities)
     output_paths = {
         "video": output_dir / "output.annotated.mp4",
         "captions": output_dir / "captions.vtt",
@@ -87,7 +84,7 @@ def run(
     }
     write_speech_json(output_paths["speech"], turns, words)
     output_paths["faces"].write_text(
-        json.dumps([track.__dict__ | {"boxes": [box.__dict__ for box in track.boxes]} for track in tracks], indent=2),
+        json.dumps(track_payloads(tracks, info.width, info.height), indent=2),
         encoding="utf-8",
     )
     write_events(output_paths["events"], events)
@@ -96,6 +93,61 @@ def run(
     write_viewer(output_paths["viewer"], output_paths["video"].name, tracks, events, info.width, info.height)
     LOGGER.info("completed captioning with %d event(s)", len(events))
     return output_paths
+
+
+def recognize(
+    input_path: Path,
+    audio_path: Path,
+    whisper_model: str = WHISPER_MODEL_NAME,
+    language: str | None = None,
+    model_directory: Path = MODEL_DIRECTORY,
+    transcription_model: object | None = None,
+    speaker_centroids: object | None = None,
+    voice_labels: dict[str, str] | None = None,
+    track_labels: dict[str, str] | None = None,
+    live: bool = False,
+    track_id_transformer: Callable[[list[FaceTrack]], None] | None = None,
+) -> tuple[MediaInfo, list[FaceTrack], list[CaptionEvent], list[SpeakerTurn], list[Word]]:
+    """Run the shared recognition pipeline without producing rendered artifacts."""
+    LOGGER.info("inspecting input %s", input_path)
+    info = inspect_media(input_path)
+    frames = read_video_frames(input_path)
+    LOGGER.info("decoded %d frames over %.2f seconds", len(frames), info.duration)
+    turns, words = transcribe_speech(
+        audio_path,
+        whisper_model,
+        model_directory / "whisper",
+        language,
+        transcription_model,
+        not live,
+    )
+    if not live:
+        turns = diarize_turns(audio_path, turns, model_directory, speaker_centroids)
+    tracks = analyze_faces(
+        frames,
+        model_directory / FACE_LANDMARKER_FILENAME,
+        MINIMUM_LIVE_FACE_DETECTIONS if live else MINIMUM_TRACK_DETECTIONS,
+        MINIMUM_LIVE_TRACK_DURATION_SECONDS if live else MINIMUM_TRACK_DURATION_SECONDS,
+    )
+    if track_id_transformer is not None:
+        track_id_transformer(tracks)
+    activities = score_face_activity(
+        audio_path,
+        frames,
+        tracks,
+        model_directory / LIGHT_ASD_FILENAME,
+        MAXIMUM_LIVE_ACTIVITY_TRACKS if live else MAXIMUM_ACTIVITY_TRACKS,
+    )
+    events = associate_speakers(
+        turns,
+        words,
+        tracks,
+        activities,
+        voice_labels,
+        track_labels,
+        live,
+    )
+    return info, tracks, events, turns, words
 
 
 def main() -> None:

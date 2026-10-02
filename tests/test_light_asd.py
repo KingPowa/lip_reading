@@ -29,6 +29,21 @@ class LightAsdTest(unittest.TestCase):
         self.assertEqual(scorer.call_count, MAXIMUM_ACTIVITY_TRACKS)
         self.assertEqual(len(activities), MAXIMUM_ACTIVITY_TRACKS)
 
+    def test_live_mode_can_limit_face_activity_work(self) -> None:
+        tracks = [
+            FaceTrack(f"face-{index}", 0.0, 2.0, [FaceBox(0.0, 0, 0, index + 1, index + 1)])
+            for index in range(5)
+        ]
+
+        with (
+            patch("src.light_asd._load_model", return_value=object()),
+            patch("src.light_asd._audio_features", return_value=np.empty((1, 13))),
+            patch("src.light_asd._score_track", return_value=[]) as scorer,
+        ):
+            score_face_activity(Path("audio.wav"), [], tracks, Path("model.pt"), maximum_tracks=2)
+
+        self.assertEqual(scorer.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

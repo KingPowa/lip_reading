@@ -1,6 +1,8 @@
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .colors import speaker_color
+
 
 @dataclass(frozen=True)
 class FaceBox:
@@ -73,4 +75,5 @@ class CaptionEvent:
         """
         data = asdict(self)
         data["faceTrack"] = data.pop("face_track")
+        data["color"] = speaker_color(self.speaker)
         return data

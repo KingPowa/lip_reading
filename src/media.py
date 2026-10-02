@@ -133,6 +133,40 @@ def extract_audio(input_path: Path, output_path: Path) -> Path:
     return output_path
 
 
+def normalize_camera_recording(input_path: Path, output_path: Path) -> Path:
+    """Create a timestamped MP4 from a finalized browser camera recording.
+
+    Browser recordings can omit WebM duration metadata even after ``stop``. Re-encoding
+    supplies presentation timestamps required by the shared video recognizer.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-fflags",
+            "+genpts",
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+    LOGGER.info("normalized browser recording to %s", output_path)
+    return output_path
+
+
 def read_video_frames(input_path: Path) -> list[VideoFrame]:
     """Decode video frames while retaining FFprobe presentation timestamps.
 

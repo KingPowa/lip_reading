@@ -25,7 +25,7 @@ wheels = [
 [[package]]
 name = "active-speaker-captioning"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "mediapipe" },
     { name = "numpy" },

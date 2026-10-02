@@ -1,13 +1,33 @@
 # Active-Speaker Captioning
 
-Turn a prerecorded video into an annotated copy with:
+Turn a prerecorded video or camera recording into an annotated copy with:
 
 - readable, speaker-labelled captions;
-- a highlight around the visible person who is speaking;
+- a coloured upper-body highlight around each visible person who is speaking;
 - a `.vtt` subtitle file for a video player; and
 - JSON files that make it easy to inspect what the pipeline decided.
 
-It is an offline MVP. It names people `Person 1`, `Person 2`, and so on **within one video**. It does not identify real people or remember anyone between videos.
+It names people `Person 1`, `Person 2`, and so on **within one recording**. It does not identify real people or remember anyone between recordings.
+
+## Use your camera
+
+Launch the local camera app, then open the printed address in a browser:
+
+```bash
+uv run --python .venv/bin/python -m src.live
+```
+
+The server loads Whisper before it prints the address. Grant camera and microphone access, confirm the spoken language (it defaults from your browser locale), and click **Start camera**. The camera never replays recordings: it remains the only video shown. The app continuously sends two-second windows for local transcription and speaker attribution, then places the resulting text and coloured speaker highlight on that live preview. Each detected speaker keeps the same colour for the camera overlay, caption, and transcript entry. Hover or focus a highlight to read that person's speech.
+
+Chromium-based browsers show their native live transcript immediately; local Whisper then supplies the speaker-coloured attribution. Other browsers still receive local caption results after each analysis window. To stay responsive, live attribution keeps face identities between windows instead of running the slower offline voice-clustering stage. Captions arrive after the local analysis time for each short window, rather than after a recording is played back. Use `--chunk-seconds` (1–10) to trade latency for more speech context. Select a language in the page, or lock one with `--language it`; this prevents short clips from being misdetected and Whisper is explicitly run in transcription mode, never translation mode.
+
+The default `http://127.0.0.1:8765` works on the computer running the app. To use another device's camera, bind the server to your network and supply a trusted TLS certificate (browsers require HTTPS before they grant camera access to a non-localhost page):
+
+```bash
+uv run --python .venv/bin/python -m src.live --host 0.0.0.0 --cert certificate.pem --key private-key.pem
+```
+
+Open the resulting `https://YOUR-COMPUTER-IP:8765` address on that device. Press `Ctrl-C` in the terminal to stop the app. For a shell executable after `uv sync`, run `live-speaker` instead.
 
 ## Start here
 
@@ -65,10 +85,10 @@ uv run --python .venv/bin/python -m src.main INPUT.mp4 --verbose
 
 | File | Open this when you want… |
 | --- | --- |
-| `output.annotated.mp4` | The finished video, with highlights and captions burned in. |
+| `output.annotated.mp4` | The finished video, with coloured upper-body highlights and matching captions burned in. |
 | `captions.vtt` | Captions to load in a compatible video player. |
-| `viewer.html` | A local review page: seek from the transcript and inspect active face boxes. Keep it beside the video. |
-| `events.json` | Final speaker, text, face-track, confidence, and state for each speech event. |
+| `viewer.html` | A local review page: seek from the colour-matched transcript and inspect active upper-body overlays. Keep it beside the video. |
+| `events.json` | Final speaker, text, face-track, confidence, state, and display colour for each speech event. |
 | `speech.json` | Raw Whisper words plus anonymous voice clusters. Use it to diagnose transcription or diarization. |
 | `faces.json` | Detected face tracks and their timestamped boxes. Use it to diagnose visual tracking. |
 | `audio.wav` | The 16 kHz mono audio extracted for the speech and active-speaker models. |
@@ -92,7 +112,7 @@ For each voice turn, the association step picks a face only when its time-weight
 
 A face track cannot be assigned two person labels. If overlapping input would assign two boxes to the same person, the lower-confidence event is marked `uncertain`, so the rendered video has one highlight per person.
 
-Only the face associated with speech at the current timestamp is drawn. Faces that are merely visible do not receive a second, neutral box.
+Only the visible speaker is drawn. The existing face track estimates an upper-body rectangle, so the overlay remains lightweight without loading a pose or segmentation model. Faces that are merely visible do not receive a neutral box.
 
 ## Improving a result
 
@@ -105,7 +125,7 @@ Use this quick triage order:
 
 ## Limits to expect
 
-- It is designed for prerecorded videos, not live streams.
+- Camera mode is continuous short-segment recognition. Captions and highlights arrive after local analysis of the current window; the preview is always live and no recorded audio or video is played back.
 - It does not perform real-name recognition or cross-video identity matching.
 - Overlapping speech is marked when detected, but exact transcription of two people talking at once remains difficult.
 - Accurate local transcription and active-speaker scoring are computationally expensive. A long video can take significantly longer than its runtime on CPU.
@@ -120,12 +140,15 @@ Use this quick triage order:
 .venv/bin/python -m compileall -q src tests
 ```
 
-The tests cover the association confidence rules and ensure caption lines fit within their available pixel width.
+The tests cover association confidence, upper-body overlay payloads, colour handoff, and caption width.
 
 ## Project map
 
 ```text
 src/main.py          command-line pipeline
+src/live.py          local camera server and recognizer endpoint
+src/live_view.py     browser camera, highlights, and transcript interface
+src/colors.py        stable speaker colour palette
 src/media.py         FFmpeg/FFprobe validation, timestamps, audio extraction
 src/speech.py        Whisper transcription and ECAPA voice clustering
 src/vision.py        MediaPipe face detection and tracking

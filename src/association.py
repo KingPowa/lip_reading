@@ -18,6 +18,9 @@ def associate_speakers(
     words: list[Word],
     tracks: list[FaceTrack],
     activities: list[FaceActivity],
+    voice_labels: dict[str, str] | None = None,
+    track_labels: dict[str, str] | None = None,
+    prefer_track_labels: bool = False,
 ) -> list[CaptionEvent]:
     """Attribute transcribed turns to visually active tracked faces.
 
@@ -30,8 +33,8 @@ def associate_speakers(
     Returns:
         Caption events that retain visible, uncertain, off-screen, and overlap state.
     """
-    voice_labels: dict[str, str] = {}
-    track_labels: dict[str, str] = {}
+    voice_labels = voice_labels if voice_labels is not None else {}
+    track_labels = track_labels if track_labels is not None else {}
     track_ids = {track.track_id for track in tracks}
     events: list[CaptionEvent] = []
     for turn in turns:
@@ -40,7 +43,11 @@ def associate_speakers(
         if selected_track is None:
             events.append(_unassigned_event(turn, words, bool(scores)))
             continue
-        label = _speaker_label(turn.speaker_id, selected_track, voice_labels, track_labels)
+        label = (
+            _track_label(selected_track, track_labels)
+            if prefer_track_labels
+            else _speaker_label(turn.speaker_id, selected_track, voice_labels, track_labels)
+        )
         if label is None:
             events.append(_unassigned_event(turn, words, True))
             continue
@@ -99,6 +106,14 @@ def _speaker_label(
     label = existing_voice_label or existing_track_label or f"Person {len(track_labels) + 1}"
     voice_labels[voice_id] = label
     track_labels[track_id] = label
+    return label
+
+
+def _track_label(track_id: str, track_labels: dict[str, str]) -> str:
+    label = track_labels.get(track_id)
+    if label is None:
+        label = f"Person {len(track_labels) + 1}"
+        track_labels[track_id] = label
     return label
 
 

@@ -6,7 +6,7 @@ import numpy as np
 
 from src.contracts import FaceBox
 from src.media import VideoFrame
-from src.vision import analyze_faces
+from src.vision import _track_detections, analyze_faces
 
 
 class VisionTest(unittest.TestCase):
@@ -25,6 +25,17 @@ class VisionTest(unittest.TestCase):
 
         self.assertEqual(len(tracks), 1)
         self.assertEqual(len(tracks[0].boxes), len(frames))
+
+    def test_live_windows_accept_short_face_tracks(self) -> None:
+        tracks = _track_detections(
+            [
+                [FaceBox(0.0, 10, 10, 20, 20)],
+                [FaceBox(0.2, 10, 10, 20, 20)],
+            ],
+            minimum_detections=2,
+            minimum_duration_seconds=0.0,
+        )
+        self.assertEqual(len(tracks), 1)
 
 
 if __name__ == "__main__":

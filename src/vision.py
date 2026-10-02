@@ -24,9 +24,17 @@ DEFAULT_FRAME_DURATION = 0.04
 CASCADE_SCALE_FACTOR = 1.05
 CASCADE_MINIMUM_NEIGHBORS = 2
 CASCADE_MINIMUM_SIZE = (30, 30)
+BODY_WIDTH_TO_FACE_RATIO = 3
+BODY_HEIGHT_TO_FACE_RATIO = 4
+BODY_TOP_OFFSET_RATIO = 3
 
 
-def analyze_faces(frames: list[VideoFrame], model_path: Path) -> list[FaceTrack]:
+def analyze_faces(
+    frames: list[VideoFrame],
+    model_path: Path,
+    minimum_detections: int = MINIMUM_TRACK_DETECTIONS,
+    minimum_duration_seconds: float = MINIMUM_TRACK_DURATION_SECONDS,
+) -> list[FaceTrack]:
     """Track MediaPipe faces on the input presentation timeline.
 
     Args:
@@ -47,12 +55,12 @@ def analyze_faces(frames: list[VideoFrame], model_path: Path) -> list[FaceTrack]
     except RuntimeError as error:
         LOGGER.warning("MediaPipe face landmarker is unavailable; using OpenCV cascades: %s", error)
     else:
-        tracks = _track_detections(detections)
+        tracks = _track_detections(detections, minimum_detections, minimum_duration_seconds)
         if tracks:
             return tracks
         LOGGER.warning("MediaPipe face landmarker found no stable tracks; using OpenCV cascades")
     detections = [_cascade_detections(frame) for frame in frames]
-    return _track_detections(detections)
+    return _track_detections(detections, minimum_detections, minimum_duration_seconds)
 
 
 def _landmarker_detections(frames: list[VideoFrame], model_path: Path) -> list[list[FaceBox]]:
@@ -90,7 +98,12 @@ def _cascade_detections(frame: VideoFrame) -> list[FaceBox]:
     return selected
 
 
-def _track_detections(detections_by_frame: list[list[FaceBox]], missing_face_limit: int = MISSING_FACE_LIMIT) -> list[FaceTrack]:
+def _track_detections(
+    detections_by_frame: list[list[FaceBox]],
+    minimum_detections: int = MINIMUM_TRACK_DETECTIONS,
+    minimum_duration_seconds: float = MINIMUM_TRACK_DURATION_SECONDS,
+    missing_face_limit: int = MISSING_FACE_LIMIT,
+) -> list[FaceTrack]:
     tracks: list[FaceTrack] = []
     active_tracks: dict[str, tuple[FaceTrack, int]] = {}
     previous_boxes: dict[str, FaceBox] = {}
@@ -112,13 +125,17 @@ def _track_detections(detections_by_frame: list[list[FaceBox]], missing_face_lim
             previous_boxes[track_id] = box
         _expire_missing_tracks(active_tracks, previous_boxes, unmatched_ids, tracks, missing_face_limit)
     tracks.extend(track for track, _ in active_tracks.values())
-    tracks = [track for track in tracks if _is_stable_track(track)]
+    tracks = [
+        track
+        for track in tracks
+        if _is_stable_track(track, minimum_detections, minimum_duration_seconds)
+    ]
     LOGGER.info("tracked %d face(s)", len(tracks))
     return tracks
 
 
-def _is_stable_track(track: FaceTrack) -> bool:
-    return len(track.boxes) >= MINIMUM_TRACK_DETECTIONS and track.end - track.start >= MINIMUM_TRACK_DURATION_SECONDS
+def _is_stable_track(track: FaceTrack, minimum_detections: int, minimum_duration_seconds: float) -> bool:
+    return len(track.boxes) >= minimum_detections and track.end - track.start >= minimum_duration_seconds
 
 
 def intersection_over_union(first: FaceBox, second: FaceBox) -> float:
@@ -165,6 +182,16 @@ def box_at(track: FaceTrack, timestamp: float) -> FaceBox | None:
         round(before.width + (after.width - before.width) * fraction),
         round(before.height + (after.height - before.height) * fraction),
     )
+
+
+def body_box(face: FaceBox, frame_width: int, frame_height: int) -> FaceBox:
+    """Estimate a speaker's visible upper body from their tracked face rectangle."""
+    # ponytail: face-scaled body estimate; use pose detection only for limb-level accuracy.
+    width = round(face.width * BODY_WIDTH_TO_FACE_RATIO)
+    height = round(face.height * BODY_HEIGHT_TO_FACE_RATIO)
+    x = max(0, min(frame_width - width, face.x - (width - face.width) // 2))
+    y = max(0, face.y - face.height // BODY_TOP_OFFSET_RATIO)
+    return FaceBox(face.timestamp, x, y, min(width, frame_width - x), min(height, frame_height - y))
 
 
 def _download_model_if_missing(model_path: Path) -> None:

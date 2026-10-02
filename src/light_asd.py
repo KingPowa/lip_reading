@@ -4,6 +4,7 @@ import logging
 import urllib.request
 import wave
 from bisect import bisect_left
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -136,6 +137,7 @@ def score_face_activity(
     frames: list[VideoFrame],
     tracks: list[FaceTrack],
     model_path: Path,
+    maximum_tracks: int = MAXIMUM_ACTIVITY_TRACKS,
 ) -> list[FaceActivity]:
     """Score every visible face with the pretrained audio-visual Light-ASD model.
 
@@ -155,7 +157,7 @@ def score_face_activity(
         return []
     model = _load_model(model_path)
     audio_features = _audio_features(audio_path)
-    candidates = sorted(tracks, key=_track_priority, reverse=True)[:MAXIMUM_ACTIVITY_TRACKS]
+    candidates = sorted(tracks, key=_track_priority, reverse=True)[:maximum_tracks]
     activities = [activity for track in candidates for activity in _score_track(model, audio_features, frames, track)]
     LOGGER.info("Light-ASD produced %d face activity samples", len(activities))
     return activities
@@ -165,6 +167,7 @@ def _track_priority(track: FaceTrack) -> int:
     return sum(box.width * box.height for box in track.boxes)
 
 
+@lru_cache
 def _load_model(model_path: Path) -> _LightASD:
     _download_weights_if_missing(model_path)
     state = torch.load(model_path, map_location="cpu", weights_only=True)
