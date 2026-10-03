@@ -1,15 +1,22 @@
 import json
 import logging
+import math
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-
-from .config import ANALYSIS_FRAME_INTERVAL
-
+import numpy as np
 
 LOGGER = logging.getLogger(__name__)
+MAXIMUM_LIVE_DURATION_SECONDS = 32.0
+MAXIMUM_LIVE_VIDEO_PIXELS = 1280 * 720
+LIVE_VIDEO_FRAME_RATE = 25
+LIVE_PROBE_TIMEOUT_SECONDS = 20
+LIVE_NORMALIZATION_TIMEOUT_SECONDS = 60
+DURATION_LIMIT_PROBE_MARGIN_SECONDS = 1.0
 
 
 class MediaError(RuntimeError):
@@ -36,15 +43,32 @@ class VideoFrame:
     image: object
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run one FFmpeg command and convert tool failures to ``MediaError``."""
     try:
-        return subprocess.run(command, check=True, text=True, capture_output=True)
+        executable = shutil.which(command[0])
+        if executable is None:
+            raise FileNotFoundError(command[0])
+        # Absolute executable + non-inheritable Python descriptors allow posix_spawn;
+        # fork can deadlock in OpenBLAS's atfork handler during concurrent masks.
+        return subprocess.run(
+            command,
+            executable=executable,
+            close_fds=False,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
     except FileNotFoundError as error:
         raise MediaError("FFmpeg/FFprobe is required on PATH") from error
     except subprocess.CalledProcessError as error:
         message = error.stderr.strip() or "media command failed"
         raise MediaError(message) from error
+    except subprocess.TimeoutExpired as error:
+        raise MediaError(f"media command exceeded {timeout_seconds} seconds") from error
 
 
 def inspect_media(input_path: Path) -> MediaInfo:
@@ -76,14 +100,20 @@ def inspect_media(input_path: Path) -> MediaInfo:
     )
     payload = json.loads(result.stdout)
     streams = payload.get("streams", [])
-    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
-    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    video = next(
+        (stream for stream in streams if stream.get("codec_type") == "video"), None
+    )
+    audio = next(
+        (stream for stream in streams if stream.get("codec_type") == "audio"), None
+    )
     if video is None or audio is None:
         raise MediaError("input must contain both video and audio streams")
 
-    numerator, denominator = (video.get("r_frame_rate", "0/1").split("/"))
+    numerator, denominator = video.get("r_frame_rate", "0/1").split("/")
     frame_rate = float(numerator) / float(denominator) if float(denominator) else 0.0
-    duration = float(video.get("duration") or payload.get("format", {}).get("duration") or 0.0)
+    duration = float(
+        video.get("duration") or payload.get("format", {}).get("duration") or 0.0
+    )
     if frame_rate <= 0 or duration <= 0:
         raise MediaError("input has no usable duration or frame rate")
     info = MediaInfo(
@@ -94,7 +124,13 @@ def inspect_media(input_path: Path) -> MediaInfo:
         has_video=True,
         has_audio=True,
     )
-    LOGGER.info("input is %.2fs, %dx%d at %.3f fps", info.duration, info.width, info.height, info.frame_rate)
+    LOGGER.info(
+        "input is %.2fs, %dx%d at %.3f fps",
+        info.duration,
+        info.width,
+        info.height,
+        info.frame_rate,
+    )
     return info
 
 
@@ -133,36 +169,88 @@ def extract_audio(input_path: Path, output_path: Path) -> Path:
     return output_path
 
 
-def normalize_camera_recording(input_path: Path, output_path: Path) -> Path:
-    """Create a timestamped MP4 from a finalized browser camera recording.
+def normalize_camera_recording(
+    input_path: Path, output_path: Path, start_seconds: float = 0.0
+) -> Path:
+    """Create a timestamped MP4 from a browser camera recording, optionally trimmed.
 
     Browser recordings can omit WebM duration metadata even after ``stop``. Re-encoding
     supplies presentation timestamps required by the shared video recognizer.
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    if not math.isfinite(start_seconds) or start_seconds < 0:
+        raise MediaError("recording start must be finite and nonnegative")
+    if start_seconds >= MAXIMUM_LIVE_DURATION_SECONDS:
+        raise MediaError("camera recording exceeds the duration limit")
+    dimensions_result = _run(
         [
-            "ffmpeg",
-            "-y",
-            "-fflags",
-            "+genpts",
-            "-i",
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
             str(input_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ]
+        ],
+        timeout_seconds=LIVE_PROBE_TIMEOUT_SECONDS,
     )
+    video = next(iter(json.loads(dimensions_result.stdout).get("streams", [])), {})
+    width, height = int(video.get("width", 0)), int(video.get("height", 0))
+    if width <= 0 or height <= 0 or width * height > MAXIMUM_LIVE_VIDEO_PIXELS:
+        raise MediaError("camera recording has missing or oversized video dimensions")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        str(input_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-r",
+        str(LIVE_VIDEO_FRAME_RATE),
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+    ]
+    if start_seconds:
+        command.extend(["-ss", str(start_seconds)])
+    remaining_duration = MAXIMUM_LIVE_DURATION_SECONDS - start_seconds
+    command.extend(
+        ["-t", str(remaining_duration + DURATION_LIMIT_PROBE_MARGIN_SECONDS)]
+    )
+    command.append(str(output_path))
+    _run(command, timeout_seconds=LIVE_NORMALIZATION_TIMEOUT_SECONDS)
+    duration_result = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(output_path),
+        ],
+        timeout_seconds=LIVE_PROBE_TIMEOUT_SECONDS,
+    )
+    duration = float(
+        json.loads(duration_result.stdout).get("format", {}).get("duration", 0)
+    )
+    if not 0 < duration <= remaining_duration:
+        raise MediaError(
+            "camera recording has missing duration or exceeds the duration limit"
+        )
     LOGGER.info("normalized browser recording to %s", output_path)
     return output_path
 
@@ -174,7 +262,8 @@ def read_video_frames(input_path: Path) -> list[VideoFrame]:
         input_path: Source video to decode.
 
     Returns:
-        Ordered decoded frames on the original presentation timeline.
+        Ordered decoded frames on the original presentation timeline, backed by
+        a temporary memory map so long videos do not retain all images in RAM.
 
     Raises:
         MediaError: If no frames can be decoded.
@@ -184,27 +273,41 @@ def read_video_frames(input_path: Path) -> list[VideoFrame]:
     if not capture.isOpened():
         raise MediaError(f"OpenCV cannot open video: {input_path}")
 
-    frames: list[VideoFrame] = []
-    frame_index = 0
+    timestamps: list[float] = []
+    frame_shape = None
     frame_rate = capture.get(cv2.CAP_PROP_FPS) or 25.0
-    while True:
-        success, image = capture.read()
-        if not success:
-            break
-        timestamp = (
-            presentation_timestamps[frame_index]
-            if frame_index < len(presentation_timestamps)
-            else capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+    # ponytail: disk-backed full frames; stream face crops if temporary disk usage matters.
+    with tempfile.TemporaryFile() as frame_file:
+        try:
+            while True:
+                success, image = capture.read()
+                if not success:
+                    break
+                frame_index = len(timestamps)
+                timestamp = (
+                    presentation_timestamps[frame_index]
+                    if frame_index < len(presentation_timestamps)
+                    else capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                )
+                if timestamp <= 0 and frame_index:
+                    timestamp = frame_index / frame_rate
+                if frame_shape is not None and image.shape != frame_shape:
+                    raise MediaError("video changes frame dimensions during decoding")
+                frame_shape = image.shape
+                image.tofile(frame_file)
+                timestamps.append(timestamp)
+        finally:
+            capture.release()
+        if not timestamps:
+            raise MediaError("input contains no decodable video frames")
+        frame_file.flush()
+        images = np.memmap(
+            frame_file, dtype=np.uint8, mode="r", shape=(len(timestamps), *frame_shape)
         )
-        if timestamp <= 0 and frame_index:
-            timestamp = frame_index / frame_rate
-        if frame_index % ANALYSIS_FRAME_INTERVAL == 0:
-            frames.append(VideoFrame(timestamp=timestamp, image=image))
-        frame_index += 1
-    capture.release()
-    if not frames:
-        raise MediaError("input contains no decodable video frames")
-    return frames
+    return [
+        VideoFrame(timestamp, image)
+        for timestamp, image in zip(timestamps, images, strict=True)
+    ]
 
 
 def video_presentation_timestamps(input_path: Path) -> list[float]:

@@ -1,2 +1,1 @@
 """Active-speaker captioning MVP."""
-

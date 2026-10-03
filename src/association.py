@@ -7,10 +7,10 @@ from dataclasses import replace
 from .config import ACTIVE_SPEAKER_THRESHOLD, ASSIGNMENT_MARGIN
 from .contracts import CaptionEvent, FaceActivity, FaceTrack, SpeakerTurn, Word
 
-
 OFF_SCREEN_SPEAKER = "Off-screen speaker"
 UNCERTAIN_SPEAKER = "Uncertain speaker"
 DEFAULT_SPEECH_TEXT = "[speech detected]"
+MAXIMUM_WORD_GAP_SECONDS = 0.4
 
 
 def associate_speakers(
@@ -21,6 +21,7 @@ def associate_speakers(
     voice_labels: dict[str, str] | None = None,
     track_labels: dict[str, str] | None = None,
     prefer_track_labels: bool = False,
+    merge_words: bool = False,
 ) -> list[CaptionEvent]:
     """Attribute transcribed turns to visually active tracked faces.
 
@@ -46,7 +47,9 @@ def associate_speakers(
         label = (
             _track_label(selected_track, track_labels)
             if prefer_track_labels
-            else _speaker_label(turn.speaker_id, selected_track, voice_labels, track_labels)
+            else _speaker_label(
+                turn.speaker_id, selected_track, voice_labels, track_labels
+            )
         )
         if label is None:
             events.append(_unassigned_event(turn, words, True))
@@ -62,7 +65,36 @@ def associate_speakers(
                 "visible",
             )
         )
-    return _disambiguate_overlaps(events)
+    events = _disambiguate_overlaps(events)
+    return _merge_word_events(events) if prefer_track_labels or merge_words else events
+
+
+def _merge_word_events(events: list[CaptionEvent]) -> list[CaptionEvent]:
+    merged: list[CaptionEvent] = []
+    for event in events:
+        previous = merged[-1] if merged else None
+        same_speaker = previous is not None and (
+            previous.speaker,
+            previous.face_track,
+            previous.state,
+        ) == (event.speaker, event.face_track, event.state)
+        adjacent = (
+            previous is not None
+            and 0 <= event.start - previous.end <= MAXIMUM_WORD_GAP_SECONDS
+        )
+        if same_speaker and adjacent:
+            text = re.sub(
+                r"(\w)\s+(['’])\s*(\w)", r"\1\2\3", f"{previous.text} {event.text}"
+            )
+            merged[-1] = replace(
+                previous,
+                end=event.end,
+                text=text,
+                confidence=min(previous.confidence, event.confidence),
+            )
+            continue
+        merged.append(event)
+    return merged
 
 
 def _activity_scores(
@@ -101,9 +133,17 @@ def _speaker_label(
 ) -> str | None:
     existing_voice_label = voice_labels.get(voice_id)
     existing_track_label = track_labels.get(track_id)
-    if existing_voice_label and existing_track_label and existing_voice_label != existing_track_label:
+    if (
+        existing_voice_label
+        and existing_track_label
+        and existing_voice_label != existing_track_label
+    ):
         return None
-    label = existing_voice_label or existing_track_label or f"Person {len(track_labels) + 1}"
+    label = (
+        existing_voice_label
+        or existing_track_label
+        or f"Person {len(set(track_labels.values())) + 1}"
+    )
     voice_labels[voice_id] = label
     track_labels[track_id] = label
     return label
@@ -112,12 +152,14 @@ def _speaker_label(
 def _track_label(track_id: str, track_labels: dict[str, str]) -> str:
     label = track_labels.get(track_id)
     if label is None:
-        label = f"Person {len(track_labels) + 1}"
+        label = f"Person {len(set(track_labels.values())) + 1}"
         track_labels[track_id] = label
     return label
 
 
-def _unassigned_event(turn: SpeakerTurn, words: list[Word], has_candidates: bool) -> CaptionEvent:
+def _unassigned_event(
+    turn: SpeakerTurn, words: list[Word], has_candidates: bool
+) -> CaptionEvent:
     return CaptionEvent(
         turn.start,
         turn.end,
@@ -131,7 +173,9 @@ def _unassigned_event(turn: SpeakerTurn, words: list[Word], has_candidates: bool
 
 def _turn_text(turn: SpeakerTurn, words: list[Word]) -> str:
     text = " ".join(
-        word.text for word in words if turn.start <= (word.start + word.end) / 2 <= turn.end
+        word.text
+        for word in words
+        if turn.start <= (word.start + word.end) / 2 <= turn.end
     ).strip()
     return re.sub(r"(\w)\s+(['’])\s*(\w)", r"\1\2\3", text) or DEFAULT_SPEECH_TEXT
 

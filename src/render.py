@@ -11,11 +11,15 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .colors import speaker_color_bgr
-from .config import CAPTION_FONT_PATH, CAPTION_FONT_SIZE, CAPTION_HORIZONTAL_MARGIN, CAPTION_LINE_HEIGHT
+from .config import (
+    CAPTION_FONT_PATH,
+    CAPTION_FONT_SIZE,
+    CAPTION_HORIZONTAL_MARGIN,
+    CAPTION_LINE_HEIGHT,
+)
 from .contracts import CaptionEvent, FaceTrack
 from .media import video_presentation_timestamps
 from .vision import body_box, box_at
-
 
 LOGGER = logging.getLogger(__name__)
 CAPTION_BACKGROUND = (0, 0, 0)
@@ -104,7 +108,9 @@ def write_events(path: Path, events: list[CaptionEvent]) -> None:
         path: Destination JSON path.
         events: Caption events to serialize.
     """
-    path.write_text(json.dumps([event.as_json() for event in events], indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps([event.as_json() for event in events], indent=2), encoding="utf-8"
+    )
 
 
 def write_vtt(path: Path, events: list[CaptionEvent]) -> None:
@@ -139,17 +145,23 @@ def write_viewer(
     payload = {
         "width": width,
         "height": height,
-        "tracks": [track for track in track_payloads(tracks, width, height) if track["track_id"] in active_track_ids],
+        "tracks": [
+            track
+            for track in track_payloads(tracks, width, height)
+            if track["track_id"] in active_track_ids
+        ],
         "events": [event.as_json() for event in events],
     }
     page = "\n".join(
         (
-            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Active speaker viewer</title>",
+            '<!doctype html><html lang="en"><meta charset="utf-8"><title>Active speaker viewer</title>',
             VIEWER_STYLE,
-            "<main><h1>Active speaker viewer</h1><section id=\"player\"><video controls src=\""
+            '<main><h1>Active speaker viewer</h1><section id="player"><video controls src="'
             + video_name
-            + "\"></video><div id=\"faces\"></div></section><aside id=\"transcript\" aria-label=\"Transcript\"></aside></main>",
-            "<script>const data = " + json.dumps(payload, ensure_ascii=False) + ";</script>",
+            + '"></video><div id="faces"></div></section><aside id="transcript" aria-label="Transcript"></aside></main>',
+            "<script>const data = "
+            + json.dumps(payload, ensure_ascii=False)
+            + ";</script>",
             VIEWER_SCRIPT,
             "</html>",
         )
@@ -185,7 +197,9 @@ def render_video(
         capture.release()
         raise RuntimeError("input video has no usable dimensions")
     silent_path = output_path.with_suffix(".silent.mp4")
-    writer = cv2.VideoWriter(str(silent_path), cv2.VideoWriter_fourcc(*"mp4v"), frame_rate, (width, height))
+    writer = cv2.VideoWriter(
+        str(silent_path), cv2.VideoWriter_fourcc(*"mp4v"), frame_rate, (width, height)
+    )
     if not writer.isOpened():
         capture.release()
         raise RuntimeError("OpenCV cannot create the rendered video")
@@ -196,7 +210,11 @@ def render_video(
             success, image = capture.read()
             if not success:
                 break
-            timestamp = timestamps[frame_index] if frame_index < len(timestamps) else frame_index / frame_rate
+            timestamp = (
+                timestamps[frame_index]
+                if frame_index < len(timestamps)
+                else frame_index / frame_rate
+            )
             active_events = _events_at(events, timestamp)
             active_tracks = _active_tracks(active_events)
             for track in tracks:
@@ -240,12 +258,22 @@ def _active_tracks(events: list[CaptionEvent]) -> dict[str, CaptionEvent]:
         existing = strongest_events.get(event.speaker)
         if existing is None or event.confidence > existing.confidence:
             strongest_events[event.speaker] = event
-    return {event.face_track: event for event in strongest_events.values() if event.face_track}
+    return {
+        event.face_track: event
+        for event in strongest_events.values()
+        if event.face_track
+    }
 
 
-def track_payloads(tracks: list[FaceTrack], width: int, height: int) -> list[dict[str, object]]:
+def track_payloads(
+    tracks: list[FaceTrack], width: int, height: int
+) -> list[dict[str, object]]:
     """Serialize face tracks with lightweight estimated upper-body rectangles."""
-    return [track.__dict__ | {"boxes": [_box_payload(box, width, height) for box in track.boxes]} for track in tracks]
+    return [
+        track.__dict__
+        | {"boxes": [_box_payload(box, width, height) for box in track.boxes]}
+        for track in tracks
+    ]
 
 
 def _box_payload(box: object, width: int, height: int) -> dict[str, object]:
@@ -260,15 +288,23 @@ def _draw_speaker(image: object, box: object, event: CaptionEvent) -> None:
     cv2.rectangle(
         overlay,
         (estimated_body.x, estimated_body.y),
-        (estimated_body.x + estimated_body.width, estimated_body.y + estimated_body.height),
+        (
+            estimated_body.x + estimated_body.width,
+            estimated_body.y + estimated_body.height,
+        ),
         color,
         -1,
     )
-    cv2.addWeighted(overlay, BODY_HIGHLIGHT_OPACITY, image, 1 - BODY_HIGHLIGHT_OPACITY, 0, image)
+    cv2.addWeighted(
+        overlay, BODY_HIGHLIGHT_OPACITY, image, 1 - BODY_HIGHLIGHT_OPACITY, 0, image
+    )
     cv2.rectangle(
         image,
         (estimated_body.x, estimated_body.y),
-        (estimated_body.x + estimated_body.width, estimated_body.y + estimated_body.height),
+        (
+            estimated_body.x + estimated_body.width,
+            estimated_body.y + estimated_body.height,
+        ),
         color,
         4,
     )
@@ -350,5 +386,7 @@ def _remux_audio(silent_path: Path, input_path: Path, output_path: Path) -> None
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
     except (FileNotFoundError, subprocess.CalledProcessError) as error:
-        message = getattr(error, "stderr", "") or "FFmpeg could not remux the annotated video"
+        message = (
+            getattr(error, "stderr", "") or "FFmpeg could not remux the annotated video"
+        )
         raise RuntimeError(message.strip()) from error

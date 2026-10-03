@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -10,8 +11,6 @@ from .association import associate_speakers
 from .config import (
     FACE_LANDMARKER_FILENAME,
     LIGHT_ASD_FILENAME,
-    MAXIMUM_ACTIVITY_TRACKS,
-    MAXIMUM_LIVE_ACTIVITY_TRACKS,
     MINIMUM_LIVE_FACE_DETECTIONS,
     MINIMUM_LIVE_TRACK_DURATION_SECONDS,
     MINIMUM_TRACK_DETECTIONS,
@@ -19,15 +18,27 @@ from .config import (
     MODEL_DIRECTORY,
     WHISPER_MODEL_NAME,
 )
-from .light_asd import score_face_activity
 from .contracts import CaptionEvent, FaceTrack, SpeakerTurn, Word
-from .media import MediaError, MediaInfo, extract_audio, inspect_media, read_video_frames
+from .light_asd import score_face_activity
+from .media import (
+    MediaError,
+    MediaInfo,
+    extract_audio,
+    inspect_media,
+    read_video_frames,
+)
 from .render import render_video, track_payloads, write_events, write_viewer, write_vtt
-from .speech import diarize_turns, transcribe_speech, write_speech_json
+from .speech import (
+    diarize_turns,
+    transcribe_speech,
+    uncommitted_words,
+    write_speech_json,
+)
 from .vision import analyze_faces
 
-
 LOGGER = logging.getLogger(__name__)
+UNASSIGNED_LIVE_VOICE = "live-voice"
+LIVE_ACTIVITY_CONTEXT_SECONDS = 1.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,12 +47,28 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         The configured command-line argument parser.
     """
-    parser = argparse.ArgumentParser(description="Caption and highlight speakers in a prerecorded video")
-    parser.add_argument("input", type=Path, help="MP4 or other FFmpeg-supported video with audio")
-    parser.add_argument("--output", type=Path, default=Path("output"), help="Directory for annotated artifacts")
-    parser.add_argument("--whisper-model", default=WHISPER_MODEL_NAME, help="Local Whisper model name")
+    parser = argparse.ArgumentParser(
+        description="Caption and highlight speakers in a prerecorded video"
+    )
+    parser.add_argument(
+        "input", type=Path, help="MP4 or other FFmpeg-supported video with audio"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("output"),
+        help="Directory for annotated artifacts",
+    )
+    parser.add_argument(
+        "--whisper-model", default=WHISPER_MODEL_NAME, help="Local Whisper model name"
+    )
     parser.add_argument("--language", help="Optional ISO language code for Whisper")
-    parser.add_argument("--model-directory", type=Path, default=MODEL_DIRECTORY, help="Local model download directory")
+    parser.add_argument(
+        "--model-directory",
+        type=Path,
+        default=MODEL_DIRECTORY,
+        help="Local model download directory",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     return parser
 
@@ -90,7 +117,14 @@ def run(
     write_events(output_paths["events"], events)
     write_vtt(output_paths["captions"], events)
     render_video(input_path, output_paths["video"], tracks, events, info.frame_rate)
-    write_viewer(output_paths["viewer"], output_paths["video"].name, tracks, events, info.width, info.height)
+    write_viewer(
+        output_paths["viewer"],
+        output_paths["video"].name,
+        tracks,
+        events,
+        info.width,
+        info.height,
+    )
     LOGGER.info("completed captioning with %d event(s)", len(events))
     return output_paths
 
@@ -107,47 +141,132 @@ def recognize(
     track_labels: dict[str, str] | None = None,
     live: bool = False,
     track_id_transformer: Callable[[list[FaceTrack]], None] | None = None,
-) -> tuple[MediaInfo, list[FaceTrack], list[CaptionEvent], list[SpeakerTurn], list[Word]]:
+    initial_prompt: str | None = None,
+    minimum_word_timestamp: float = float("-inf"),
+    maximum_word_timestamp: float = float("inf"),
+    timings: dict[str, float] | None = None,
+    activity_device: str = "cpu",
+) -> tuple[
+    MediaInfo, list[FaceTrack], list[CaptionEvent], list[SpeakerTurn], list[Word]
+]:
     """Run the shared recognition pipeline without producing rendered artifacts."""
     LOGGER.info("inspecting input %s", input_path)
+    timings = timings if timings is not None else {}
+    stage_started = time.perf_counter()
     info = inspect_media(input_path)
     frames = read_video_frames(input_path)
+    timings["decode"] = time.perf_counter() - stage_started
     LOGGER.info("decoded %d frames over %.2f seconds", len(frames), info.duration)
+    stage_started = time.perf_counter()
     turns, words = transcribe_speech(
         audio_path,
         whisper_model,
         model_directory / "whisper",
         language,
         transcription_model,
-        not live,
+        True,
+        initial_prompt,
     )
+    timings["transcription"] = time.perf_counter() - stage_started
+    caption_words = uncommitted_words(
+        words, initial_prompt, minimum_word_timestamp, maximum_word_timestamp
+    )
+    stage_started = time.perf_counter()
     if not live:
         turns = diarize_turns(audio_path, turns, model_directory, speaker_centroids)
+    timings["diarization"] = time.perf_counter() - stage_started
+    stage_started = time.perf_counter()
     tracks = analyze_faces(
         frames,
         model_directory / FACE_LANDMARKER_FILENAME,
         MINIMUM_LIVE_FACE_DETECTIONS if live else MINIMUM_TRACK_DETECTIONS,
         MINIMUM_LIVE_TRACK_DURATION_SECONDS if live else MINIMUM_TRACK_DURATION_SECONDS,
+        use_face_detector=live,
     )
     if track_id_transformer is not None:
         track_id_transformer(tracks)
-    activities = score_face_activity(
-        audio_path,
-        frames,
-        tracks,
-        model_directory / LIGHT_ASD_FILENAME,
-        MAXIMUM_LIVE_ACTIVITY_TRACKS if live else MAXIMUM_ACTIVITY_TRACKS,
-    )
+    timings["faces"] = time.perf_counter() - stage_started
+    stage_started = time.perf_counter()
+    activity_start = float("-inf")
+    activity_end = float("inf")
+    if live:
+        activity_start = (
+            min((word.start for word in caption_words), default=float("inf"))
+            - LIVE_ACTIVITY_CONTEXT_SECONDS
+        )
+        activity_end = (
+            max((word.end for word in caption_words), default=float("-inf"))
+            + LIVE_ACTIVITY_CONTEXT_SECONDS
+        )
+    activities = []
+    if not live or caption_words:
+        activities = score_face_activity(
+            audio_path,
+            frames,
+            tracks,
+            model_directory / LIGHT_ASD_FILENAME,
+            activity_device,
+            activity_start,
+            activity_end,
+        )
+    timings["activity"] = time.perf_counter() - stage_started
+    if live and speaker_centroids is not None:
+        stage_started = time.perf_counter()
+        visual_events = associate_speakers(
+            _live_word_turns(caption_words, turns),
+            caption_words,
+            tracks,
+            activities,
+            prefer_track_labels=True,
+            merge_words=True,
+        )
+        visual_turns = [
+            SpeakerTurn(
+                event.face_track or f"{UNASSIGNED_LIVE_VOICE}-{event.state}-{index}",
+                event.start,
+                event.end,
+                event.confidence,
+            )
+            for index, event in enumerate(visual_events)
+        ]
+        turns = diarize_turns(
+            audio_path,
+            visual_turns,
+            model_directory,
+            speaker_centroids,
+            preserve_short_turn_ids=True,
+        )
+        timings["diarization"] = time.perf_counter() - stage_started
+    caption_turns = turns
+    if live:
+        caption_turns = _live_word_turns(caption_words, turns)
     events = associate_speakers(
-        turns,
-        words,
+        caption_turns,
+        caption_words,
         tracks,
         activities,
         voice_labels,
         track_labels,
-        live,
+        prefer_track_labels=live and speaker_centroids is None,
+        merge_words=live,
     )
     return info, tracks, events, turns, words
+
+
+def _live_word_turns(words: list[Word], turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
+    word_turns = []
+    for word in words:
+        if word.end <= word.start:
+            continue
+        midpoint = (word.start + word.end) / 2
+        speaker_id = next(
+            (turn.speaker_id for turn in turns if turn.start <= midpoint <= turn.end),
+            UNASSIGNED_LIVE_VOICE,
+        )
+        word_turns.append(
+            SpeakerTurn(speaker_id, word.start, word.end, word.confidence)
+        )
+    return word_turns
 
 
 def main() -> None:

@@ -1,9 +1,10 @@
-"""CPU inference wrapper for the published Light-ASD architecture."""
+"""Local inference wrapper for the published Light-ASD architecture."""
 
 import logging
 import urllib.request
 import wave
 from bisect import bisect_left
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,11 +14,10 @@ import torch
 from python_speech_features import mfcc
 from torch import nn
 
+from .config import LIGHT_ASD_URL
 from .contracts import FaceActivity, FaceTrack
-from .config import MAXIMUM_ACTIVITY_TRACKS, LIGHT_ASD_URL
 from .media import VideoFrame
 from .vision import box_at
-
 
 LOGGER = logging.getLogger(__name__)
 TARGET_FRAME_RATE = 25
@@ -26,6 +26,7 @@ FACE_PADDING_RATIO = 0.40
 FACE_CROP_SIZE = 224
 MODEL_FACE_SIZE = 112
 MFCCS_PER_FRAME = 4
+MFCC_FEATURE_COUNT = 13
 MAXIMUM_FRAMES_PER_BATCH = 500
 
 
@@ -33,42 +34,78 @@ class _AudioBlock(nn.Module):
     def __init__(self, input_channels: int, output_channels: int) -> None:
         super().__init__()
         self.relu = nn.ReLU()
-        self.m_3 = nn.Conv2d(input_channels, output_channels, (3, 1), padding=(1, 0), bias=False)
+        self.m_3 = nn.Conv2d(
+            input_channels, output_channels, (3, 1), padding=(1, 0), bias=False
+        )
         self.bn_m_3 = nn.BatchNorm2d(output_channels, momentum=0.01, eps=0.001)
-        self.t_3 = nn.Conv2d(output_channels, output_channels, (1, 3), padding=(0, 1), bias=False)
+        self.t_3 = nn.Conv2d(
+            output_channels, output_channels, (1, 3), padding=(0, 1), bias=False
+        )
         self.bn_t_3 = nn.BatchNorm2d(output_channels, momentum=0.01, eps=0.001)
-        self.m_5 = nn.Conv2d(input_channels, output_channels, (5, 1), padding=(2, 0), bias=False)
+        self.m_5 = nn.Conv2d(
+            input_channels, output_channels, (5, 1), padding=(2, 0), bias=False
+        )
         self.bn_m_5 = nn.BatchNorm2d(output_channels, momentum=0.01, eps=0.001)
-        self.t_5 = nn.Conv2d(output_channels, output_channels, (1, 5), padding=(0, 2), bias=False)
+        self.t_5 = nn.Conv2d(
+            output_channels, output_channels, (1, 5), padding=(0, 2), bias=False
+        )
         self.bn_t_5 = nn.BatchNorm2d(output_channels, momentum=0.01, eps=0.001)
         self.last = nn.Conv2d(output_channels, output_channels, 1, bias=False)
         self.bn_last = nn.BatchNorm2d(output_channels, momentum=0.01, eps=0.001)
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        output_3 = self.relu(self.bn_t_3(self.t_3(self.relu(self.bn_m_3(self.m_3(tensor))))))
-        output_5 = self.relu(self.bn_t_5(self.t_5(self.relu(self.bn_m_5(self.m_5(tensor))))))
+        output_3 = self.relu(
+            self.bn_t_3(self.t_3(self.relu(self.bn_m_3(self.m_3(tensor)))))
+        )
+        output_5 = self.relu(
+            self.bn_t_5(self.t_5(self.relu(self.bn_m_5(self.m_5(tensor)))))
+        )
         return self.relu(self.bn_last(self.last(output_3 + output_5)))
 
 
 class _VisualBlock(nn.Module):
-    def __init__(self, input_channels: int, output_channels: int, downsample: bool = False) -> None:
+    def __init__(
+        self, input_channels: int, output_channels: int, downsample: bool = False
+    ) -> None:
         super().__init__()
         self.relu = nn.ReLU()
         stride = (1, 2, 2) if downsample else (1, 1, 1)
-        self.s_3 = nn.Conv3d(input_channels, output_channels, (1, 3, 3), stride=stride, padding=(0, 1, 1), bias=False)
+        self.s_3 = nn.Conv3d(
+            input_channels,
+            output_channels,
+            (1, 3, 3),
+            stride=stride,
+            padding=(0, 1, 1),
+            bias=False,
+        )
         self.bn_s_3 = nn.BatchNorm3d(output_channels, momentum=0.01, eps=0.001)
-        self.t_3 = nn.Conv3d(output_channels, output_channels, (3, 1, 1), padding=(1, 0, 0), bias=False)
+        self.t_3 = nn.Conv3d(
+            output_channels, output_channels, (3, 1, 1), padding=(1, 0, 0), bias=False
+        )
         self.bn_t_3 = nn.BatchNorm3d(output_channels, momentum=0.01, eps=0.001)
-        self.s_5 = nn.Conv3d(input_channels, output_channels, (1, 5, 5), stride=stride, padding=(0, 2, 2), bias=False)
+        self.s_5 = nn.Conv3d(
+            input_channels,
+            output_channels,
+            (1, 5, 5),
+            stride=stride,
+            padding=(0, 2, 2),
+            bias=False,
+        )
         self.bn_s_5 = nn.BatchNorm3d(output_channels, momentum=0.01, eps=0.001)
-        self.t_5 = nn.Conv3d(output_channels, output_channels, (5, 1, 1), padding=(2, 0, 0), bias=False)
+        self.t_5 = nn.Conv3d(
+            output_channels, output_channels, (5, 1, 1), padding=(2, 0, 0), bias=False
+        )
         self.bn_t_5 = nn.BatchNorm3d(output_channels, momentum=0.01, eps=0.001)
         self.last = nn.Conv3d(output_channels, output_channels, 1, bias=False)
         self.bn_last = nn.BatchNorm3d(output_channels, momentum=0.01, eps=0.001)
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        output_3 = self.relu(self.bn_t_3(self.t_3(self.relu(self.bn_s_3(self.s_3(tensor))))))
-        output_5 = self.relu(self.bn_t_5(self.t_5(self.relu(self.bn_s_5(self.s_5(tensor))))))
+        output_3 = self.relu(
+            self.bn_t_3(self.t_3(self.relu(self.bn_s_3(self.s_3(tensor)))))
+        )
+        output_5 = self.relu(
+            self.bn_t_5(self.t_5(self.relu(self.bn_s_5(self.s_5(tensor)))))
+        )
         return self.relu(self.bn_last(self.last(output_3 + output_5)))
 
 
@@ -85,7 +122,9 @@ class _VisualEncoder(nn.Module):
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         tensor = self.block3(self.pool2(self.block2(self.pool1(self.block1(tensor)))))
         batches, frames, channels, width, height = tensor.transpose(1, 2).shape
-        tensor = tensor.transpose(1, 2).reshape(batches * frames, channels, width, height)
+        tensor = tensor.transpose(1, 2).reshape(
+            batches * frames, channels, width, height
+        )
         return self.maxpool(tensor).view(batches, frames, channels)
 
 
@@ -112,7 +151,9 @@ class _BGRU(nn.Module):
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         tensor = self.gelu(self.gru_forward(tensor)[0])
-        return self.gelu(torch.flip(self.gru_backward(torch.flip(tensor, dims=[1]))[0], dims=[1]))
+        return self.gelu(
+            torch.flip(self.gru_backward(torch.flip(tensor, dims=[1]))[0], dims=[1])
+        )
 
 
 class _LightASD(nn.Module):
@@ -123,9 +164,15 @@ class _LightASD(nn.Module):
         self.GRU = _BGRU()
         self.classifier = nn.Linear(128, 2)
 
-    def forward(self, audio_features: torch.Tensor, visual_features: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, audio_features: torch.Tensor, visual_features: torch.Tensor
+    ) -> torch.Tensor:
         normalized_visual = (
-            visual_features.view(visual_features.shape[0], 1, *visual_features.shape[1:]) / 255 - 0.4161
+            visual_features.view(
+                visual_features.shape[0], 1, *visual_features.shape[1:]
+            )
+            / 255
+            - 0.4161
         ) / 0.1688
         visual = self.visualEncoder(normalized_visual)
         audio = self.audioEncoder(audio_features.unsqueeze(1).transpose(2, 3))
@@ -137,7 +184,9 @@ def score_face_activity(
     frames: list[VideoFrame],
     tracks: list[FaceTrack],
     model_path: Path,
-    maximum_tracks: int = MAXIMUM_ACTIVITY_TRACKS,
+    device: str = "cpu",
+    minimum_timestamp: float = float("-inf"),
+    maximum_timestamp: float = float("inf"),
 ) -> list[FaceActivity]:
     """Score every visible face with the pretrained audio-visual Light-ASD model.
 
@@ -155,30 +204,56 @@ def score_face_activity(
     """
     if not tracks:
         return []
-    model = _load_model(model_path)
+    model = _load_model(model_path, device)
     audio_features = _audio_features(audio_path)
-    candidates = sorted(tracks, key=_track_priority, reverse=True)[:maximum_tracks]
-    activities = [activity for track in candidates for activity in _score_track(model, audio_features, frames, track)]
+    activities = [
+        activity
+        for track in tracks
+        if max(track.start, minimum_timestamp) <= min(track.end, maximum_timestamp)
+        for activity in _score_track(
+            model,
+            audio_features,
+            frames,
+            replace(
+                track,
+                start=max(track.start, minimum_timestamp),
+                end=min(track.end, maximum_timestamp),
+            ),
+        )
+    ]
     LOGGER.info("Light-ASD produced %d face activity samples", len(activities))
     return activities
 
 
-def _track_priority(track: FaceTrack) -> int:
-    return sum(box.width * box.height for box in track.boxes)
-
-
 @lru_cache
-def _load_model(model_path: Path) -> _LightASD:
+def _load_model(model_path: Path, device: str = "cpu") -> _LightASD:
     _download_weights_if_missing(model_path)
     state = torch.load(model_path, map_location="cpu", weights_only=True)
     converted = {
         key.removeprefix("model.").replace("lossAV.FC", "classifier"): value
         for key, value in state.items()
-        if key.startswith("model.") or key.startswith("lossAV.FC")
+        if key.startswith(("model.", "lossAV.FC"))
     }
     model = _LightASD()
     model.load_state_dict(converted, strict=True)
-    return model.eval()
+    return model.to(device).eval()
+
+
+def warm_up_activity_model(model_path: Path, device: str = "cpu") -> None:
+    """Load and cache Light-ASD weights before accepting recordings."""
+    model = _load_model(model_path, device)
+    with torch.inference_mode():
+        model(
+            torch.zeros(
+                1,
+                TARGET_FRAME_RATE * MFCCS_PER_FRAME,
+                MFCC_FEATURE_COUNT,
+                device=device,
+            ),
+            torch.zeros(
+                1, TARGET_FRAME_RATE, MODEL_FACE_SIZE, MODEL_FACE_SIZE, device=device
+            ),
+        ).cpu()
 
 
 def _download_weights_if_missing(model_path: Path) -> None:
@@ -197,7 +272,7 @@ def _audio_features(audio_path: Path) -> np.ndarray:
         samples = np.frombuffer(audio.readframes(audio.getnframes()), dtype=np.int16)
         if audio.getframerate() != 16000 or audio.getnchannels() != 1:
             raise RuntimeError("Light-ASD requires normalized 16 kHz mono audio")
-    return mfcc(samples, 16000, numcep=13, winlen=0.025, winstep=0.010)
+    return mfcc(samples, 16000, numcep=MFCC_FEATURE_COUNT, winlen=0.025, winstep=0.010)
 
 
 def _score_track(
@@ -207,17 +282,32 @@ def _score_track(
     track: FaceTrack,
 ) -> list[FaceActivity]:
     timestamps = np.arange(track.start, track.end + FRAME_DURATION / 2, FRAME_DURATION)
-    face_frames = np.stack([_face_at_timestamp(frames, track, timestamp) for timestamp in timestamps])
+    face_frames = np.stack(
+        [_face_at_timestamp(frames, track, timestamp) for timestamp in timestamps]
+    )
     scores: list[float] = []
+    device = next(model.parameters()).device
     for start in range(0, len(face_frames), MAXIMUM_FRAMES_PER_BATCH):
         end = min(len(face_frames), start + MAXIMUM_FRAMES_PER_BATCH)
-        visual = torch.from_numpy(face_frames[start:end]).unsqueeze(0).float()
-        window = _mfcc_window(audio_features, track.start + start * FRAME_DURATION, end - start)
-        audio = torch.from_numpy(window).unsqueeze(0).float()
+        visual = (
+            torch.from_numpy(face_frames[start:end])
+            .unsqueeze(0)
+            .to(device=device, dtype=torch.float32)
+        )
+        window = _mfcc_window(
+            audio_features, track.start + start * FRAME_DURATION, end - start
+        )
+        audio = (
+            torch.from_numpy(window).unsqueeze(0).to(device=device, dtype=torch.float32)
+        )
         with torch.inference_mode():
-            scores.extend(torch.softmax(model(audio, visual), dim=1)[:, 1].tolist())
+            scores.extend(
+                torch.softmax(model(audio, visual), dim=1)[:, 1].cpu().tolist()
+            )
     return [
-        FaceActivity(track.track_id, float(timestamp), float(timestamp + FRAME_DURATION), score)
+        FaceActivity(
+            track.track_id, float(timestamp), float(timestamp + FRAME_DURATION), score
+        )
         for timestamp, score in zip(timestamps, scores, strict=True)
     ]
 
@@ -229,31 +319,42 @@ def _frame_at(frames: list[VideoFrame], timestamp: float) -> VideoFrame:
     if index == len(frames):
         return frames[-1]
     before, after = frames[index - 1], frames[index]
-    return before if timestamp - before.timestamp <= after.timestamp - timestamp else after
+    return (
+        before if timestamp - before.timestamp <= after.timestamp - timestamp else after
+    )
 
 
-def _face_at_timestamp(frames: list[VideoFrame], track: FaceTrack, timestamp: float) -> np.ndarray:
+def _face_at_timestamp(
+    frames: list[VideoFrame], track: FaceTrack, timestamp: float
+) -> np.ndarray:
     box = box_at(track, timestamp)
     if box is None:
-        raise RuntimeError(f"face track {track.track_id} is missing its own timestamped box")
+        raise RuntimeError(
+            f"face track {track.track_id} is missing its own timestamped box"
+        )
     return _face_frame(_frame_at(frames, timestamp).image, box)
 
 
 def _face_frame(image: object, box: object) -> np.ndarray:
-    height, width = image.shape[:2]
     size = round(max(box.width, box.height) * (1 + 2 * FACE_PADDING_RATIO))
     center_x = box.x + box.width // 2
     center_y = box.y + box.height // 2
     left, top = center_x - size // 2, center_y - size // 2
     right, bottom = left + size, top + size
-    padded = cv2.copyMakeBorder(image, size, size, size, size, cv2.BORDER_CONSTANT, value=(110, 110, 110))
+    padded = cv2.copyMakeBorder(
+        image, size, size, size, size, cv2.BORDER_CONSTANT, value=(110, 110, 110)
+    )
     crop = padded[top + size : bottom + size, left + size : right + size]
-    face = cv2.cvtColor(cv2.resize(crop, (FACE_CROP_SIZE, FACE_CROP_SIZE)), cv2.COLOR_BGR2GRAY)
+    face = cv2.cvtColor(
+        cv2.resize(crop, (FACE_CROP_SIZE, FACE_CROP_SIZE)), cv2.COLOR_BGR2GRAY
+    )
     offset = (FACE_CROP_SIZE - MODEL_FACE_SIZE) // 2
     return face[offset : offset + MODEL_FACE_SIZE, offset : offset + MODEL_FACE_SIZE]
 
 
-def _mfcc_window(features: np.ndarray, start_seconds: float, frame_count: int) -> np.ndarray:
+def _mfcc_window(
+    features: np.ndarray, start_seconds: float, frame_count: int
+) -> np.ndarray:
     start = round(start_seconds * 100)
     length = frame_count * MFCCS_PER_FRAME
     window = features[start : start + length]

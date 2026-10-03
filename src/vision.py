@@ -1,14 +1,18 @@
 """Face tracking and visual active-speaker evidence."""
 
+import atexit
 import logging
+import threading
 import urllib.request
 from bisect import bisect_left
+from functools import cache
 from pathlib import Path
 
 import cv2
 import mediapipe as mp
 
 from .config import (
+    ANALYSIS_FRAME_INTERVAL,
     FACE_LANDMARKER_URL,
     FACE_TRACK_IOU_THRESHOLD,
     MINIMUM_TRACK_DETECTIONS,
@@ -18,7 +22,6 @@ from .config import (
 from .contracts import FaceBox, FaceTrack
 from .media import VideoFrame
 
-
 LOGGER = logging.getLogger(__name__)
 DEFAULT_FRAME_DURATION = 0.04
 CASCADE_SCALE_FACTOR = 1.05
@@ -27,6 +30,9 @@ CASCADE_MINIMUM_SIZE = (30, 30)
 BODY_WIDTH_TO_FACE_RATIO = 3
 BODY_HEIGHT_TO_FACE_RATIO = 4
 BODY_TOP_OFFSET_RATIO = 3
+FACE_DETECTION_CONFIDENCE = 0.5
+FACE_DETECTION_MODEL = 1
+FACE_DETECTOR_LOCK = threading.Lock()
 
 
 def analyze_faces(
@@ -34,6 +40,8 @@ def analyze_faces(
     model_path: Path,
     minimum_detections: int = MINIMUM_TRACK_DETECTIONS,
     minimum_duration_seconds: float = MINIMUM_TRACK_DURATION_SECONDS,
+    *,
+    use_face_detector: bool = False,
 ) -> list[FaceTrack]:
     """Track MediaPipe faces on the input presentation timeline.
 
@@ -49,26 +57,90 @@ def analyze_faces(
     """
     if not frames:
         return []
+    detection_frames = frames[::ANALYSIS_FRAME_INTERVAL]
+    if detection_frames[-1] is not frames[-1]:
+        detection_frames.append(frames[-1])
+    if use_face_detector:
+        detections = _detector_detections(detection_frames)
+        return _track_detections(
+            detections, minimum_detections, minimum_duration_seconds
+        )
     try:
         _download_model_if_missing(model_path)
-        detections = _landmarker_detections(frames, model_path)
+        detections = _landmarker_detections(detection_frames, model_path)
     except RuntimeError as error:
-        LOGGER.warning("MediaPipe face landmarker is unavailable; using OpenCV cascades: %s", error)
+        LOGGER.warning(
+            "MediaPipe face landmarker is unavailable; using OpenCV cascades: %s", error
+        )
     else:
-        tracks = _track_detections(detections, minimum_detections, minimum_duration_seconds)
+        tracks = _track_detections(
+            detections, minimum_detections, minimum_duration_seconds
+        )
         if tracks:
             return tracks
-        LOGGER.warning("MediaPipe face landmarker found no stable tracks; using OpenCV cascades")
-    detections = [_cascade_detections(frame) for frame in frames]
+        LOGGER.warning(
+            "MediaPipe face landmarker found no stable tracks; using OpenCV cascades"
+        )
+    detections = [_cascade_detections(frame) for frame in detection_frames]
     return _track_detections(detections, minimum_detections, minimum_duration_seconds)
 
 
-def _landmarker_detections(frames: list[VideoFrame], model_path: Path) -> list[list[FaceBox]]:
+@cache
+def _full_range_detector():
+    detector = mp.solutions.face_detection.FaceDetection(
+        model_selection=FACE_DETECTION_MODEL,
+        min_detection_confidence=FACE_DETECTION_CONFIDENCE,
+    )
+    atexit.register(detector.close)
+    return detector
+
+
+def _detector_detections(frames: list[VideoFrame]) -> list[list[FaceBox]]:
+    with FACE_DETECTOR_LOCK:
+        detector = _full_range_detector()
+        detections = []
+        for frame in frames:
+            height, width = frame.image.shape[:2]
+            result = detector.process(cv2.cvtColor(frame.image, cv2.COLOR_BGR2RGB))
+            boxes = [
+                detection_box(
+                    detection.location_data.relative_bounding_box,
+                    frame.timestamp,
+                    width,
+                    height,
+                )
+                for detection in result.detections or []
+            ]
+            detections.append(
+                [box for box in boxes if box.width > 0 and box.height > 0]
+            )
+        return detections
+
+
+def detection_box(
+    relative_box: object, timestamp: float, width: int, height: int
+) -> FaceBox:
+    """Convert a detector's relative rectangle into clipped pixel coordinates."""
+    left = max(0, min(width, round(relative_box.xmin * width)))
+    top = max(0, min(height, round(relative_box.ymin * height)))
+    right = max(0, min(width, round((relative_box.xmin + relative_box.width) * width)))
+    bottom = max(
+        0, min(height, round((relative_box.ymin + relative_box.height) * height))
+    )
+    return FaceBox(timestamp, left, top, right - left, bottom - top)
+
+
+def _landmarker_detections(
+    frames: list[VideoFrame], model_path: Path
+) -> list[list[FaceBox]]:
     landmarker = _create_landmarker(model_path)
     with landmarker:
         return [
             _face_detections(
-                landmarker.detect_for_video(_media_image(frame.image), _timestamp_ms(frame.timestamp, frame_index)),
+                landmarker.detect_for_video(
+                    _media_image(frame.image),
+                    _timestamp_ms(frame.timestamp, frame_index),
+                ),
                 frame,
             )
             for frame_index, frame in enumerate(frames)
@@ -92,8 +164,13 @@ def _cascade_detections(frame: VideoFrame) -> list[FaceBox]:
         )
     ]
     selected: list[FaceBox] = []
-    for box in sorted(boxes, key=lambda candidate: candidate.width * candidate.height, reverse=True):
-        if all(intersection_over_union(box, existing) < FACE_TRACK_IOU_THRESHOLD for existing in selected):
+    for box in sorted(
+        boxes, key=lambda candidate: candidate.width * candidate.height, reverse=True
+    ):
+        if all(
+            intersection_over_union(box, existing) < FACE_TRACK_IOU_THRESHOLD
+            for existing in selected
+        ):
             selected.append(box)
     return selected
 
@@ -115,7 +192,10 @@ def _track_detections(
             if track_id is None:
                 track_id = f"face-{next_track_number}"
                 next_track_number += 1
-                active_tracks[track_id] = (FaceTrack(track_id, box.timestamp, box.timestamp, [box]), 0)
+                active_tracks[track_id] = (
+                    FaceTrack(track_id, box.timestamp, box.timestamp, [box]),
+                    0,
+                )
             else:
                 track, _ = active_tracks[track_id]
                 track.boxes.append(box)
@@ -123,7 +203,9 @@ def _track_detections(
                 active_tracks[track_id] = (track, 0)
                 unmatched_ids.remove(track_id)
             previous_boxes[track_id] = box
-        _expire_missing_tracks(active_tracks, previous_boxes, unmatched_ids, tracks, missing_face_limit)
+        _expire_missing_tracks(
+            active_tracks, previous_boxes, unmatched_ids, tracks, missing_face_limit
+        )
     tracks.extend(track for track, _ in active_tracks.values())
     tracks = [
         track
@@ -134,8 +216,13 @@ def _track_detections(
     return tracks
 
 
-def _is_stable_track(track: FaceTrack, minimum_detections: int, minimum_duration_seconds: float) -> bool:
-    return len(track.boxes) >= minimum_detections and track.end - track.start >= minimum_duration_seconds
+def _is_stable_track(
+    track: FaceTrack, minimum_detections: int, minimum_duration_seconds: float
+) -> bool:
+    return (
+        len(track.boxes) >= minimum_detections
+        and track.end - track.start >= minimum_duration_seconds
+    )
 
 
 def intersection_over_union(first: FaceBox, second: FaceBox) -> float:
@@ -167,7 +254,11 @@ def box_at(track: FaceTrack, timestamp: float) -> FaceBox | None:
     Returns:
         An interpolated rectangle, or ``None`` when the track is not visible.
     """
-    if not track.boxes or timestamp < track.start or timestamp > track.end + DEFAULT_FRAME_DURATION:
+    if (
+        not track.boxes
+        or timestamp < track.start
+        or timestamp > track.end + DEFAULT_FRAME_DURATION
+    ):
         return None
     index = bisect_left(track.boxes, timestamp, key=lambda box: box.timestamp)
     before = track.boxes[max(0, index - 1)]
@@ -191,7 +282,9 @@ def body_box(face: FaceBox, frame_width: int, frame_height: int) -> FaceBox:
     height = round(face.height * BODY_HEIGHT_TO_FACE_RATIO)
     x = max(0, min(frame_width - width, face.x - (width - face.width) // 2))
     y = max(0, face.y - face.height // BODY_TOP_OFFSET_RATIO)
-    return FaceBox(face.timestamp, x, y, min(width, frame_width - x), min(height, frame_height - y))
+    return FaceBox(
+        face.timestamp, x, y, min(width, frame_width - x), min(height, frame_height - y)
+    )
 
 
 def _download_model_if_missing(model_path: Path) -> None:
@@ -218,7 +311,9 @@ def _create_landmarker(model_path: Path):
 
 
 def _media_image(image: object) -> mp.Image:
-    return mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    return mp.Image(
+        image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    )
 
 
 def _timestamp_ms(timestamp: float, frame_index: int) -> int:
@@ -233,7 +328,9 @@ def _face_detections(result: object, frame: VideoFrame) -> list[FaceBox]:
     ]
 
 
-def _landmarks_box(landmarks: list[object], timestamp: float, width: int, height: int) -> FaceBox:
+def _landmarks_box(
+    landmarks: list[object], timestamp: float, width: int, height: int
+) -> FaceBox:
     coordinates_x = [landmark.x for landmark in landmarks]
     coordinates_y = [landmark.y for landmark in landmarks]
     left = max(0, round(min(coordinates_x) * width))
@@ -243,13 +340,19 @@ def _landmarks_box(landmarks: list[object], timestamp: float, width: int, height
     return FaceBox(timestamp, left, top, max(1, right - left), max(1, bottom - top))
 
 
-def _matching_track_id(box: FaceBox, unmatched_ids: set[str], previous_boxes: dict[str, FaceBox]) -> str | None:
+def _matching_track_id(
+    box: FaceBox, unmatched_ids: set[str], previous_boxes: dict[str, FaceBox]
+) -> str | None:
     track_id = max(
         unmatched_ids,
         key=lambda candidate: intersection_over_union(previous_boxes[candidate], box),
         default=None,
     )
-    if track_id is None or intersection_over_union(previous_boxes[track_id], box) < FACE_TRACK_IOU_THRESHOLD:
+    if (
+        track_id is None
+        or intersection_over_union(previous_boxes[track_id], box)
+        < FACE_TRACK_IOU_THRESHOLD
+    ):
         return None
     return track_id
 

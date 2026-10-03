@@ -1,30 +1,119 @@
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
+from src import vision
 from src.contracts import FaceBox
 from src.media import VideoFrame
 from src.vision import _track_detections, analyze_faces
 
 
 class VisionTest(unittest.TestCase):
+    def test_live_detector_reuses_model_and_tracks_clipped_boxes_without_downloads(
+        self,
+    ) -> None:
+        relative_box = SimpleNamespace(xmin=-0.1, ymin=0.25, width=0.6, height=0.5)
+        detection = SimpleNamespace(
+            location_data=SimpleNamespace(relative_bounding_box=relative_box)
+        )
+        detector = Mock()
+        detector.process.return_value = SimpleNamespace(detections=[detection])
+        frames = [
+            VideoFrame(index / 25, np.zeros((40, 40, 3), dtype=np.uint8))
+            for index in range(13)
+        ]
+        with (
+            patch(
+                "src.vision.mp.solutions.face_detection.FaceDetection",
+                return_value=detector,
+            ) as factory,
+            patch("src.vision._download_model_if_missing") as download,
+            patch("src.vision._cascade_detections") as cascade,
+        ):
+            first = analyze_faces(
+                frames, Path("unused.task"), 2, 0.0, use_face_detector=True
+            )
+            second = analyze_faces(
+                frames, Path("unused.task"), 2, 0.0, use_face_detector=True
+            )
+        vision._full_range_detector.cache_clear()
+        factory.assert_called_once_with(model_selection=1, min_detection_confidence=0.5)
+        download.assert_not_called()
+        cascade.assert_not_called()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0].boxes[0], FaceBox(0, 0, 10, 20, 20))
+        self.assertEqual(
+            [box.timestamp for box in first[0].boxes], [0.0, 0.2, 0.4, 0.48]
+        )
+
+    def test_live_detector_does_not_replace_absent_faces_with_cascade_candidates(
+        self,
+    ) -> None:
+        frames = [VideoFrame(0, np.zeros((40, 40, 3), dtype=np.uint8))]
+        detector = Mock()
+        detector.process.return_value = SimpleNamespace(detections=None)
+        with (
+            patch(
+                "src.vision.mp.solutions.face_detection.FaceDetection",
+                return_value=detector,
+            ),
+            patch("src.vision._cascade_detections") as cascade,
+        ):
+            tracks = analyze_faces(
+                frames, Path("unused.task"), 1, 0.0, use_face_detector=True
+            )
+        vision._full_range_detector.cache_clear()
+        self.assertEqual(tracks, [])
+        cascade.assert_not_called()
+
+    def test_detector_samples_frames_separately_and_covers_clip_end(self) -> None:
+        frames = [
+            VideoFrame(index / 25, np.zeros((40, 40, 3), dtype=np.uint8))
+            for index in range(13)
+        ]
+
+        def detect(sampled_frames, _model_path):
+            return [
+                [FaceBox(frame.timestamp, 10, 10, 20, 20)] for frame in sampled_frames
+            ]
+
+        with (
+            patch("src.vision._download_model_if_missing"),
+            patch("src.vision._landmarker_detections", side_effect=detect) as detector,
+        ):
+            tracks = analyze_faces(frames, Path("face_landmarker.task"), 2, 0.0)
+
+        self.assertEqual(
+            [frame.timestamp for frame in detector.call_args.args[0]],
+            [0.0, 0.2, 0.4, 0.48],
+        )
+        self.assertEqual(tracks[0].end, frames[-1].timestamp)
+
     def test_unstable_mediapipe_result_uses_stable_cascade_tracks(self) -> None:
-        frames = [VideoFrame(index * 0.2, np.zeros((40, 40, 3), dtype=np.uint8)) for index in range(16)]
+        frames = [
+            VideoFrame(index / 25, np.zeros((40, 40, 3), dtype=np.uint8))
+            for index in range(76)
+        ]
 
         def cascade(frame):
             return [FaceBox(frame.timestamp, 10, 10, 20, 20)]
 
         with (
             patch("src.vision._download_model_if_missing"),
-            patch("src.vision._landmarker_detections", return_value=[[FaceBox(0.0, 10, 10, 20, 20)]] + [[]] * 15),
+            patch(
+                "src.vision._landmarker_detections",
+                return_value=[[FaceBox(0.0, 10, 10, 20, 20)]] + [[]] * 15,
+            ),
             patch("src.vision._cascade_detections", side_effect=cascade),
         ):
             tracks = analyze_faces(frames, Path("face_landmarker.task"))
 
         self.assertEqual(len(tracks), 1)
-        self.assertEqual(len(tracks[0].boxes), len(frames))
+        self.assertEqual(len(tracks[0].boxes), 16)
 
     def test_live_windows_accept_short_face_tracks(self) -> None:
         tracks = _track_detections(
