@@ -1,7 +1,12 @@
 import unittest
 
-from src.contracts import CaptionEvent, FaceBox, FaceTrack
-from src.render import _active_tracks, _caption_font, _caption_lines, track_payloads
+from src.app.rendering.offline import (
+    _active_tracks,
+    _caption_font,
+    _caption_lines,
+    track_payloads,
+)
+from src.core.contracts import CaptionEvent, FaceBox, FaceTrack
 
 
 class RenderTest(unittest.TestCase):

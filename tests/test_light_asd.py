@@ -5,9 +5,9 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from src.contracts import FaceActivity, FaceBox, FaceTrack
-from src.light_asd import _score_track, score_face_activity
-from src.media import VideoFrame
+from src.core.contracts import FaceActivity, FaceBox, FaceTrack
+from src.core.media import VideoFrame
+from src.core.vision.light_asd import _score_track, score_face_activity
 
 FACE_TRACK_COUNT = 9
 
@@ -25,9 +25,14 @@ class LightAsdTest(unittest.TestCase):
             FaceTrack("later", 7.0, 8.0, [FaceBox(7, 0, 0, 10, 10)]),
         ]
         with (
-            patch("src.light_asd._load_model", return_value=object()) as loader,
-            patch("src.light_asd._audio_features", return_value=np.empty((1, 13))),
-            patch("src.light_asd._score_track", return_value=[]) as scorer,
+            patch(
+                "src.core.vision.light_asd._load_model", return_value=object()
+            ) as loader,
+            patch(
+                "src.core.vision.light_asd._audio_features",
+                return_value=np.empty((1, 13)),
+            ),
+            patch("src.core.vision.light_asd._score_track", return_value=[]) as scorer,
         ):
             score_face_activity(
                 Path("audio.wav"), [], tracks, Path("model.pt"), "mps", 3.0, 5.0
@@ -83,9 +88,14 @@ class LightAsdTest(unittest.TestCase):
             return [FaceActivity(track.track_id, 0.0, 2.0, 0.9)]
 
         with (
-            patch("src.light_asd._load_model", return_value=object()),
-            patch("src.light_asd._audio_features", return_value=np.empty((1, 13))),
-            patch("src.light_asd._score_track", side_effect=score_track) as scorer,
+            patch("src.core.vision.light_asd._load_model", return_value=object()),
+            patch(
+                "src.core.vision.light_asd._audio_features",
+                return_value=np.empty((1, 13)),
+            ),
+            patch(
+                "src.core.vision.light_asd._score_track", side_effect=score_track
+            ) as scorer,
         ):
             activities = score_face_activity(
                 Path("audio.wav"), [], tracks, Path("model.pt")
@@ -106,9 +116,12 @@ class LightAsdTest(unittest.TestCase):
         ]
 
         with (
-            patch("src.light_asd._load_model", return_value=object()),
-            patch("src.light_asd._audio_features", return_value=np.empty((1, 13))),
-            patch("src.light_asd._score_track", return_value=[]) as scorer,
+            patch("src.core.vision.light_asd._load_model", return_value=object()),
+            patch(
+                "src.core.vision.light_asd._audio_features",
+                return_value=np.empty((1, 13)),
+            ),
+            patch("src.core.vision.light_asd._score_track", return_value=[]) as scorer,
         ):
             score_face_activity(Path("audio.wav"), [], tracks, Path("model.pt"))
 

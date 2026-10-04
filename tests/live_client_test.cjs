@@ -6,9 +6,10 @@ function element() {
   const attributes = new Map();
   return {
     value: "it",
+    options: [{ value: "it" }],
     disabled: false,
     children: [],
-    style: { setProperty() {} },
+    style: {},
     classList: { toggle() {}, add() {} },
     setAttribute(name, value) {
       attributes.set(name, value);
@@ -38,13 +39,38 @@ function element() {
   };
 }
 
+const settings = {
+  transcriptionIntervalMilliseconds: 350,
+  language: "it",
+  sampleRate: 16000,
+  contextSeconds: 0,
+  maximumWindowSeconds: 1,
+  maximumBufferSeconds: 12,
+  packetSeconds: 0.1,
+  geometryExpirySeconds: 0.7,
+  retryMilliseconds: 200,
+  requestTimeoutMilliseconds: 10000,
+  latencyTargetSeconds: 1,
+  maximumPreviewWords: 14,
+  maximumMetricItems: 2000,
+  captionDisplayMilliseconds: 2500,
+};
+
+function load(context, name) {
+  vm.runInContext(
+    fs.readFileSync(`src/app/static/${name}.js`, "utf8"),
+    context,
+  );
+}
+
 async function check() {
   const elements = new Map();
   const requests = [];
   const timers = [];
   let releaseFirst;
+  let now = 1000;
   const context = vm.createContext({
-    configuration: { chunkMilliseconds: 2000, language: "it" },
+    configuration: settings,
     document: {
       querySelector(selector) {
         if (!elements.has(selector)) elements.set(selector, element());
@@ -57,194 +83,197 @@ async function check() {
       },
     },
     navigator: { language: "it-IT" },
-    performance: { now: () => 10000 },
+    performance: { now: () => now },
     requestAnimationFrame() {},
     setTimeout(callback) {
       timers.push(callback);
     },
     clearTimeout() {},
-    Blob,
-    Map,
-    Set,
-    crypto: { randomUUID: () => "test-session" },
-    fetch: async (_path, options) => {
-      requests.push(options);
+    ArrayBuffer,
+    DataView,
+    Int16Array,
+    AbortSignal,
+    window: {},
+    fetch: async (path, options) => {
+      requests.push({ path, ...options });
       if (requests.length === 1)
         await new Promise((resolve) => {
           releaseFirst = resolve;
         });
       return {
         ok: true,
+        status: 200,
         json: async () => ({
           sessionId: "test-session",
-          events: [
-            {
-              start: requests.length,
-              end: requests.length + 0.5,
-              speaker: "Person 1",
-              text: `speech ${requests.length}`,
-              color: "#fff",
-              faceTrack: "face-1",
-            },
-          ],
-          provisionalText: "",
-          timings: { total: 3 },
-          captureEnd: 4,
+          captureEnd: 0.4,
+          acknowledgedUntil: requests.length === 1 ? 0.4 : 0.8,
+          events: [],
+          provisionalText: "hello",
+          timings: { transcription: 0.1 },
         }),
       };
     },
   });
-  vm.runInContext(fs.readFileSync("src/live_client.js", "utf8"), context);
+  load(context, "audio-buffer");
+  load(context, "renderer");
+  load(context, "client");
   vm.runInContext(
-    "sessionId = 'test-session'; sessionStartedAt = 0; capturing = true;",
-    context,
-  );
-  vm.runInContext(
-    "queueClip(new Blob(['first']), { id: 1, offset: 0, sessionId, generation: captureGeneration }, false);",
+    "sessionId = 'test-session'; sessionStartedAt = 0; capturing = true; audioBuffer = new AudioBufferQueue(configuration); audioBuffer.append(new Int16Array(6400).fill(1), 0); drainAudio();",
     context,
   );
   await Promise.resolve();
   vm.runInContext(
-    "queueClip(new Blob(['first', 'second']), { id: 1, offset: 0, sessionId, generation: captureGeneration }, false);",
+    "audioBuffer.append(new Int16Array(6400).fill(2), 0.4); drainAudio();",
     context,
   );
-  vm.runInContext(
-    "queueClip(new Blob(['first', 'second', 'third']), { id: 1, offset: 0, sessionId, generation: captureGeneration }, true);",
-    context,
-  );
-  assert.equal(requests.length, 1, "uploads must be serialized");
+  assert.equal(requests.length, 1, "ASR uploads must be serialized");
+  assert.equal(requests[0].path, "/audio");
   releaseFirst();
   await new Promise((resolve) => setImmediate(resolve));
+  vm.runInContext("drainAudio();", context);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
-    requests.length,
-    2,
-    "pending cumulative snapshots should coalesce",
+    requests[1].body.byteLength,
+    12800,
+    "pending snapshots retain all uncommitted audio",
   );
-  assert.equal(
-    await requests[1].body.text(),
-    "firstsecondthird",
-    "speech captured under load must survive",
-  );
-  assert.equal(
-    elements.get("#transcript").children.length,
-    2,
-    "valid older results must be committed",
-  );
-  assert.equal(vm.runInContext("activeEvents.length", context), 1);
-  assert.equal(requests[1].headers["X-Capture-Final"], "true");
+  const bytes = new DataView(requests[1].body);
+  assert.equal(bytes.getInt16(0, true), 2);
+  assert.equal(vm.runInContext("audioBuffer.chunks.length", context), 0);
+
   vm.runInContext(
-    "currentGeometry = { faces: [{trackId: 'face-1', box: {x: 10, y: 10, width: 20, height: 20}, contour: []}] }; geometryReceivedAt = performance.now(); render();",
+    `renderer.capturing = true; renderer.updateGeometry({ timestamp: 0.9, width: 640, height: 360, faces: [{trackId:'face-1',box:{x:10,y:10,width:20,height:20}}], speaker: {timestamp:0.9,revision:2,state:'visible',faceTrack:'face-1',speaker:'Person 1',color:'#fff'}}); renderer.render();`,
     context,
   );
   const outline = elements.get("#faces").children[0];
-  vm.runInContext("currentGeometry.faces[0].box.x = 25; render();", context);
+  assert.ok(outline, "speaker outline must appear before any transcript event");
+  vm.runInContext(
+    "renderer.geometry.faces[0].box.x = 25; renderer.captionUntil = 0; renderer.render();",
+    context,
+  );
   assert.equal(
     elements.get("#faces").children[0],
     outline,
-    "tracking updates must preserve the focused overlay",
+    "caption expiry must not expire a speaking outline",
   );
-  assert.match(
-    outline.getAttribute("points"),
-    /^25,/,
-    "outline must follow current geometry",
-  );
+  assert.match(outline.getAttribute("points"), /^25,/);
   vm.runInContext(
-    "geometryReceivedAt -= TRACKING_EXPIRY_MILLISECONDS + 1; render();",
+    "renderer.updateSpeaker({timestamp:0.9,revision:1,state:'silent'}); renderer.render();",
     context,
   );
   assert.equal(
     elements.get("#faces").children.length,
+    1,
+    "late activity replies must not overwrite newer fusion evidence",
+  );
+  now = 2000;
+  vm.runInContext("renderer.render();", context);
+  assert.equal(
+    elements.get("#faces").children.length,
     0,
-    "stale geometry must disappear",
+    "freshness uses capture age, not response arrival",
   );
-  assert.equal(
-    vm.runInContext(
-      "activeEvents.every(event => event.endsAt <= performance.now() + configuration.chunkMilliseconds)",
-      context,
-    ),
-    true,
-    "preview captions must not queue beyond the update cadence",
-  );
-  vm.runInContext(
-    "sessionId = 'new-session'; applyResult({sessionId: 'test-session', events: [{text: 'stale'}]}, {sessionId: 'test-session'});",
-    context,
-  );
-  assert.equal(
-    elements.get("#transcript").children.length,
-    2,
-    "previous-session replies must not leak",
-  );
-  vm.runInContext("sessionId = 'test-session';", context);
+
   let attempts = 0;
-  context.fetch = async (_path, options) => {
-    requests.push(options);
+  context.fetch = async (path, options) => {
     attempts += 1;
+    requests.push({ path, ...options });
     return {
-      status: attempts === 1 ? 429 : 200,
       ok: attempts > 1,
+      status: attempts === 1 ? 429 : 200,
       json: async () => ({
         sessionId: "test-session",
+        captureEnd: 0.8,
+        acknowledgedUntil: 1.2,
         events: [],
-        captureEnd: 10,
+        timings: { transcription: 0.1 },
       }),
     };
   };
   vm.runInContext(
-    "queueClip(new Blob(['retained']), {id: 2, offset: 4, sessionId, generation: captureGeneration}, false);",
+    "audioBuffer = new AudioBufferQueue(configuration); audioBuffer.append(new Int16Array(6400).fill(7), 0.8); drainAudio();",
     context,
   );
+  await new Promise((resolve) => setImmediate(resolve));
+  const retained = requests.at(-1);
   vm.runInContext(
-    "queueClip(new Blob(['retained', ' speech']), {id: 2, offset: 4, sessionId, generation: captureGeneration}, false);",
+    "audioBuffer.append(new Int16Array(6400).fill(3), 1.2); drainAudio();",
     context,
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
-    vm.runInContext("pendingClips.size", context),
-    1,
-    "busy response must retain audio",
+    requests.at(-1).headers["X-Capture-Job"],
+    retained.headers["X-Capture-Job"],
   );
-  timers.at(-1)();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(
-    await requests.at(-1).body.text(),
-    "retained speech",
-    "retry must include newer buffered speech",
+  assert.deepEqual(
+    new Uint8Array(requests.at(-1).body),
+    new Uint8Array(retained.body),
+    "retry keeps an identical idempotent job",
   );
-  assert.equal(vm.runInContext("pendingClips.size", context), 0);
-  const transcriptEntries = elements.get("#transcript").children.length;
+
   vm.runInContext(
-    "applyResult({sessionId, captureEnd: 20, events: [{start: 1, end: 11, text: 'first long phrase'}, {start: 11, end: 20, text: 'second long phrase'}]}, {sessionId});",
+    "const queue = new AudioBufferQueue(configuration); queue.append(new Int16Array(16000).fill(4),0); queue.append(new Int16Array(16000).fill(5),1); queue.acknowledge(1.8); const tail = queue.snapshot(true);",
     context,
   );
-  assert.equal(
-    vm.runInContext(
-      "activeEvents[0].endsAt <= activeEvents[1].startsAt",
-      context,
-    ),
-    true,
-    "compressed captions must retain spoken order",
+  assert.equal(vm.runInContext("tail.offset", context), 1.8);
+  assert.equal(vm.runInContext("tail.samples.length", context), 3200);
+  assert.equal(vm.runInContext("tail.final", context), true);
+  assert.throws(
+    () => vm.runInContext("queue.append(new Int16Array(1600),3)", context),
+    /discontinuity/,
   );
-  assert.equal(
-    vm.runInContext(
-      "activeEvents.at(-1).endsAt <= performance.now() + configuration.chunkMilliseconds",
-      context,
-    ),
-    true,
-    "a long recognition response must fit within one update cadence",
-  );
-  vm.runInContext(
-    "applyResult({sessionId, captureEnd: 21, events: [{start: 20, end: 21, text: 'latest phrase'}]}, {sessionId});",
-    context,
-  );
-  assert.equal(vm.runInContext("activeEvents.length", context), 1);
-  assert.equal(
-    elements.get("#transcript").children.length,
-    transcriptEntries + 3,
-    "refreshing the preview must preserve every transcript event",
-  );
+
+  for (const rate of [44100, 48000]) {
+    let Processor;
+    const messages = [];
+    const worklet = vm.createContext({
+      sampleRate: rate,
+      currentTime: 0,
+      Int16Array,
+      AudioWorkletProcessor: class {
+        constructor() {
+          this.port = {
+            postMessage(message) {
+              messages.push(message);
+            },
+          };
+        }
+      },
+      registerProcessor(_name, processor) {
+        Processor = processor;
+      },
+    });
+    load(worklet, "audio-worklet");
+    const processor = new Processor({ processorOptions: settings });
+    for (let frame = 0; frame < rate; frame += 128) {
+      worklet.currentTime = frame / rate;
+      processor.process([
+        [new Float32Array(Math.min(128, rate - frame)).fill(0.5)],
+      ]);
+    }
+    processor.port.onmessage({ data: "flush" });
+    const packets = messages.filter((message) => message.samples);
+    const sampleCount = packets.reduce(
+      (sum, message) => sum + message.samples.length,
+      0,
+    );
+    assert.ok(
+      Math.abs(sampleCount - 16000) <= 1,
+      `${rate} resampling must retain phase`,
+    );
+    assert.ok(
+      packets.every((packet) =>
+        packet.samples.every((sample) => sample === 16384),
+      ),
+    );
+    assert.equal(
+      messages.at(-1).stopped,
+      true,
+      "Stop flushes the last partial PCM packet",
+    );
+  }
   console.log(
-    "live client: serialized capture, coalescing, result lifecycle, caption scheduling, session isolation passed",
+    "live client: independent outlines, PCM retention, retry, freshness, stop flush, and resampling passed",
   );
 }
 

@@ -1,16 +1,6 @@
 """Consistent, high-contrast colours for anonymous speaker labels."""
 
-SPEAKER_COLORS = (
-    "#38bdf8",
-    "#fb7185",
-    "#a3e635",
-    "#fbbf24",
-    "#c084fc",
-    "#2dd4bf",
-    "#fb923c",
-    "#f472b6",
-)
-NEUTRAL_COLOR = "#e5e7eb"
+from src.config.rendering import NEUTRAL_COLOR, SPEAKER_COLORS
 
 
 def speaker_color(speaker: str) -> str:

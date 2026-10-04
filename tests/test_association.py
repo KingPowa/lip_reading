@@ -1,7 +1,7 @@
 import unittest
 
-from src.association import associate_speakers
-from src.contracts import FaceActivity, FaceBox, FaceTrack, SpeakerTurn, Word
+from src.core.contracts import FaceActivity, FaceBox, FaceTrack, SpeakerTurn, Word
+from src.core.tracking.association import associate_speakers
 
 
 class AssociationTest(unittest.TestCase):

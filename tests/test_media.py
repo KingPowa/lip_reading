@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from src.media import MediaError, _run, normalize_camera_recording, read_video_frames
+from src.core.media import (
+    MediaError,
+    _run,
+    normalize_camera_recording,
+    read_video_frames,
+)
 
 
 class MediaTest(unittest.TestCase):
@@ -25,7 +30,7 @@ class MediaTest(unittest.TestCase):
         dimensions = MagicMock(
             stdout=json.dumps({"streams": [{"width": 1920, "height": 1080}]})
         )
-        with patch("src.media._run", return_value=dimensions) as runner:
+        with patch("src.core.media._run", return_value=dimensions) as runner:
             with self.assertRaises(MediaError):
                 normalize_camera_recording(
                     Path("recording.webm"), Path("normalized.mp4")
@@ -38,7 +43,9 @@ class MediaTest(unittest.TestCase):
             stdout=json.dumps({"streams": [{"width": 640, "height": 360}]})
         )
         duration = MagicMock(stdout=json.dumps({"format": {"duration": "23"}}))
-        with patch("src.media._run", side_effect=[dimensions, MagicMock(), duration]):
+        with patch(
+            "src.core.media._run", side_effect=[dimensions, MagicMock(), duration]
+        ):
             with self.assertRaises(MediaError):
                 normalize_camera_recording(
                     Path("recording.webm"), Path("normalized.mp4"), 10.0
@@ -52,7 +59,7 @@ class MediaTest(unittest.TestCase):
         )
         duration = MagicMock(stdout=json.dumps({"format": {"duration": "20"}}))
         with patch(
-            "src.media._run", side_effect=[dimensions, MagicMock(), duration]
+            "src.core.media._run", side_effect=[dimensions, MagicMock(), duration]
         ) as runner:
             result = normalize_camera_recording(
                 Path("recording.webm"), Path("normalized.mp4"), 10.0
@@ -68,14 +75,14 @@ class MediaTest(unittest.TestCase):
 
     def test_media_timeout_is_reported_as_a_media_error(self) -> None:
         with patch(
-            "src.media.subprocess.run",
+            "src.core.media.subprocess.run",
             side_effect=subprocess.TimeoutExpired("ffmpeg", 60),
         ):
             with self.assertRaises(MediaError):
                 _run(["ffmpeg"], timeout_seconds=60)
 
     def test_invalid_recording_start_is_rejected_before_ffmpeg(self) -> None:
-        with patch("src.media._run") as runner:
+        with patch("src.core.media._run") as runner:
             for start_seconds in (-1.0, float("nan"), float("inf")):
                 with (
                     self.subTest(start_seconds=start_seconds),
@@ -95,8 +102,10 @@ class MediaTest(unittest.TestCase):
         capture.read.side_effect = [(True, image) for image in images] + [(False, None)]
 
         with (
-            patch("src.media.video_presentation_timestamps", return_value=timestamps),
-            patch("src.media.cv2.VideoCapture", return_value=capture),
+            patch(
+                "src.core.media.video_presentation_timestamps", return_value=timestamps
+            ),
+            patch("src.core.media.cv2.VideoCapture", return_value=capture),
         ):
             frames = read_video_frames(Path("recording.mp4"))
 

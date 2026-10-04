@@ -11,33 +11,32 @@ It names people `Person 1`, `Person 2`, and so on **within one recording**. It d
 
 ## Use your camera
 
-Launch the local camera app, then open the printed address in a browser:
-
 ```bash
-uv run --python .venv/bin/python -m src.live
+uv sync
+uv run --python .venv/bin/python -m src.app.live --language it
 ```
 
-The server loads Whisper, Light-ASD, ECAPA, and the person instance model before it prints the address. The first launch downloads missing weights, including the 11.7 MB silhouette model. Grant camera and microphone access, confirm the spoken language (it defaults from your browser locale), and click **Start camera**. The preview remains live. Capture uses overlapping continuous recordings, with cumulative updates every four seconds by default. One upload runs at a time; pending updates combine without dropping their captured audio, and busy responses are retried. Stop finishes buffered speech before enabling another capture session.
+Open the printed address and choose **Start camera**. Select the language before capture. Italian, English, Spanish, French, and German have configured small [Vosk models](https://alphacephei.com/vosk/models). The selected model downloads once into `models/` and loads before capture starts. Camera and microphone access require localhost or HTTPS.
 
-Local faster-whisper is the single text source for live captions, using CPU INT8 inference. Its uncommitted tail is labelled **Provisional**; word timestamps, three seconds of preceding audio, and text-overlap reconciliation connect successive updates. Live mode defaults to `base`; choose `small` or larger for more recognition detail. Light-ASD attributes individual words to visible faces and forms speaking runs inside transcription segments. ECAPA keeps anonymous voice labels for those runs within the capture session. `--chunk-seconds` (1–10) controls upload cadence. Select a language in the page or use `--language it` for Italian.
+Live mode runs three independent channels:
 
-Current-frame face detection and person instance segmentation run independently of speech recognition. A coloured silhouette follows the current position of the last attributed speaker, including when people touch. If occlusion or competing masks make the match ambiguous, the app shows the current face outline. Geometry expires rather than freezing at an old position. Hover or focus a highlight to read the attributed speech. Preview captions keep spoken-time order within an update and yield to newer results; long batches fit within the upload cadence. The transcript retains every caption with its session timestamp.
+- **Audio:** an AudioWorklet produces mono 16 kHz PCM every 100 ms. A persistent Vosk decoder consumes each packet once and returns partial text while you speak. Final text and word times enter the transcript at an utterance boundary or on Stop. A provisional transcript row updates throughout the utterance.
+- **Vision:** small current JPEGs run through face detection and mouth landmarks about ten times per second. Boxes follow rough position overlap. There is no person segmentation, ECAPA clustering, or Light-ASD inference in the live path.
+- **Attribution:** recent mouth movement and microphone energy select a current face. Competing evidence is `uncertain`; speech with no moving visible mouth is estimated `off_screen`. Highlights update from current evidence and continue independently of caption timing. Silence releases a highlight, and stale camera geometry expires.
 
-Light-ASD automatically uses an available CUDA or Apple MPS GPU, warms its inference before capture, and falls back to CPU if warm-up fails. Use `--activity-device cpu` to force CPU inference. OpenCV runs without its competing parallel pool. Startup logs show the selected backend and thread counts; each recognition update logs its capture interval and stage timings. Whisper consumes the already extracted PCM samples directly. FFmpeg and FFprobe use process spawning to avoid the observed OpenBLAS/fork deadlock in the threaded server.
+The one second target applies to current visual evidence and provisional recognition. Capture cadence is 100 ms; processing and freshness are measured separately. A decoder can need more acoustic context to resolve an ambiguous word, so an absolute one second guarantee for every word on every device is not established. Final utterance commitment can take longer; partial text remains visible. See [the current replay measurements](progress/06-independent-realtime.md).
 
-If recognition falls more than 60 seconds behind, capture pauses and drains its retained recordings. Errors retain the failed upload and expose **Retry recognition**. On the tested Apple M3, four Torch CPU threads were used:
+Only one audio upload per capture runs at a time. Unacknowledged PCM remains in a bounded buffer, retries reuse the same job, and Stop flushes the worklet and decoder before releasing the session. If network or decoding falls behind by twelve seconds, capture pauses and drains retained speech. Camera and audio activity requests continue independently of a busy decoder. **Retry recognition** retains failed audio. Stale responses cannot replace evidence from another capture session.
+
+`--chunk-seconds` now controls PCM upload cadence (0.05–1 second, default 0.1). Use the default for the latency target. Live mode requires a selected language; it does not perform automatic language detection. `--speech-model /path/to/vosk-model` accepts a compatible local model. Whisper model selection belongs to the offline command. Existing `python -m src.live` and `live-speaker` entry points also work.
+
+For access from another device, supply a trusted certificate:
 
 ```bash
-OMP_NUM_THREADS=4 uv run --python .venv/bin/python -m src.live --language it
+uv run --python .venv/bin/python -m src.app.live --language it --host 0.0.0.0 --cert certificate.pem --key private-key.pem
 ```
 
-The default `http://127.0.0.1:8765` works on the computer running the app. To use another device's camera, bind the server to your network and supply a trusted TLS certificate (browsers require HTTPS before they grant camera access to a non-localhost page):
-
-```bash
-uv run --python .venv/bin/python -m src.live --host 0.0.0.0 --cert certificate.pem --key private-key.pem
-```
-
-Open the resulting `https://YOUR-COMPUTER-IP:8765` address on that device. Press `Ctrl-C` in the terminal to stop the app. For a shell executable after `uv sync`, run `live-speaker` instead.
+Press `Ctrl-C` to stop the server.
 
 ## Start here
 
@@ -122,7 +121,7 @@ For each voice turn, the association step picks a face only when its time-weight
 
 A face track cannot be assigned two person labels. If overlapping input would assign two boxes to the same person, the lower-confidence event is marked `uncertain`, so the rendered video has one highlight per person.
 
-Only attributed speakers are highlighted. The offline renderer estimates an upper-body rectangle from each face. The live preview uses current person contours with a face-outline fallback when segmentation is ambiguous.
+Only attributed speakers are highlighted. The offline renderer estimates an upper-body rectangle from each face. The live preview outlines the current speaking face.
 
 ## Improving a result
 
@@ -135,12 +134,12 @@ Use this quick triage order:
 
 ## Limits to expect
 
-- Camera captions arrive after local analysis; processing time and backlog appear in the status. Current visual tracking does not make transcription instantaneous.
+- Live captions use provisional streaming text. Recognition accuracy and word latency depend on the speech model, audio clarity, and device load.
 - It does not perform real-name recognition or cross-video identity matching.
 - Overlapping speech is marked when detected, but exact transcription of two people talking at once remains difficult.
 - Accurate local transcription and active-speaker scoring are computationally expensive. A long video can take significantly longer than its runtime on CPU.
-- Active-speaker inference receives consecutive images; face detection samples separately and includes the last frame. Images use temporary disk-backed memory maps. The full 640×360 sample needs about 9.8 GB of temporary frame storage. Live recordings are limited to 32 seconds, 1280×720 pixels, and 25 fps.
-- Voice clustering and face matching remain probabilistic. Occlusion, camera cuts, overlapping voices, and imperfect person masks can produce uncertain attribution or identity changes. No instance-mask quality benchmark or multi-speaker error-rate benchmark is included.
+- Offline active-speaker inference receives consecutive images stored in temporary disk-backed memory maps; the full 640×360 sample needs about 9.8 GB of temporary frame storage. Live mode sends PCM and separate JPEGs up to 640×480; it does not decode video recordings.
+- Live attribution is a mouth-motion heuristic, not identity recognition or calibrated active-speaker inference. Background noise, yawning, small faces, occlusion, camera cuts, and simultaneous speech can cause uncertain or incorrect attribution. Rough box matching can change identities on crossings. Offline voice clustering remains probabilistic.
 - Words are decoded from audio; this is not a visual-to-text model for silent lip reading.
 - Burned-in captions use a Unicode-capable font, so Italian accents and apostrophes render as text instead of replacement characters.
 - The result is evidence-based, not a ground-truth transcript. Review important captions before publishing them.
@@ -153,23 +152,29 @@ Use this quick triage order:
 node tests/live_client_test.cjs
 ```
 
-The tests cover asynchronous capture and retry, session isolation and cleanup, word commitment, voice continuity, current geometry and mask association, consecutive-frame evidence, rendering, and media limits. A saved browser replay can be compared with the supplied transcription using `python tests/evaluate_live.py output/streaming-check/review-final.json`. See [the faster-whisper replay](progress/05-live-asr-performance.md) for current live latency and its accuracy tradeoff, [the latency investigation](progress/04-streaming-latency-investigation.md) for prior measurements and deadlock evidence, and [the earlier repair report](progress/03-streaming-repair.md) for the preceding implementation.
+The tests cover concurrent audio/vision, incremental decoding, PCM continuity and retries, session isolation, Stop flush, resampling, mouth evidence, current geometry, offline recognition, rendering, and media validation. The real browser replay and its limits are documented in [the independent pipeline report](progress/06-independent-realtime.md). Earlier reports under `progress/` describe the previous architecture.
 
 ## Project map
 
 ```text
-src/main.py          command-line pipeline
-src/live.py          local camera server and recognizer endpoint
-src/live_view.py     browser page
-src/live_client.js   capture queue, current highlights, and transcript interface
-src/live_tracking.py current face identities and person-mask association
-src/person_segmentation.py cached OpenCV person instance masks
-src/colors.py        stable speaker colour palette
-src/media.py         FFmpeg/FFprobe validation, timestamps, audio extraction
-src/speech.py        Whisper transcription and ECAPA voice clustering
-src/vision.py        MediaPipe face detection and tracking
-src/light_asd.py     audio-visual active-speaker probabilities
-src/association.py   speaker-to-face decision rules
-src/render.py        video, VTT, JSON, and review-page output
-progress/            plain-language notes for each improvement decision
+src/
+  core/
+    audio/            incremental Vosk, model storage, offline Whisper and voices
+    vision/           current face/mouth observations, offline faces and Light-ASD
+    tracking/         current speaker estimates, offline association rules
+    contracts.py      domain data
+    media.py          offline FFmpeg and frame access
+  config/             model catalog, tuning, transport limits, display settings
+  app/
+    live.py           live command-line startup
+    offline.py        offline pipeline and command line
+    service.py        independent channel coordination
+    server.py         HTTP transport
+    sessions.py       capture lifecycle and concurrency
+    rendering/        JSON display payloads, pages, offline video rendering
+    templates/        live HTML
+    static/           PCM buffer, worklet, transport controller, live renderer
+  live.py             compatibility command entry point
+  main.py             compatibility command entry point
+progress/             implementation and measurement reports
 ```

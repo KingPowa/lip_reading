@@ -7,8 +7,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.contracts import Word
-from src.speech import FasterWhisperAdapter, transcribe_speech, uncommitted_words
+from src.core.audio.speech import (
+    FasterWhisperAdapter,
+    transcribe_speech,
+    uncommitted_words,
+)
+from src.core.contracts import Word
 
 
 class TranscriptionTest(unittest.TestCase):
@@ -70,7 +74,9 @@ class TranscriptionTest(unittest.TestCase):
 
         model = Model()
         samples = np.zeros(16000, dtype=np.float32)
-        with patch("src.speech._audio_samples", return_value=(samples, 16000)):
+        with patch(
+            "src.core.audio.speech._audio_samples", return_value=(samples, 16000)
+        ):
             transcribe_speech(Path("audio.wav"), "base", Path("models"), "IT", model)
         self.assertEqual(model.options["language"], "it")
         self.assertEqual(model.options["task"], "transcribe")
@@ -83,7 +89,7 @@ class TranscriptionTest(unittest.TestCase):
 
         model = Model()
         with patch(
-            "src.speech._audio_samples",
+            "src.core.audio.speech._audio_samples",
             return_value=(np.zeros(16000, dtype=np.float32), 16000),
         ):
             transcribe_speech(
@@ -114,7 +120,7 @@ class TranscriptionTest(unittest.TestCase):
         model = Model()
         adapter = FasterWhisperAdapter(model)
         with patch(
-            "src.speech._audio_samples",
+            "src.core.audio.speech._audio_samples",
             return_value=(np.zeros(16000, dtype=np.float32), 16000),
         ):
             turns, words = transcribe_speech(

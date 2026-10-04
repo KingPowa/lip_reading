@@ -1,199 +1,208 @@
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from src.contracts import CaptionEvent, FaceBox, FaceTrack, Word
-from src.live import (
-    MAXIMUM_SESSIONS,
-    RecognitionBusyError,
-    RecognitionService,
-    build_parser,
-)
-from src.live_view import build_page
-from src.media import MediaInfo
+import numpy as np
+
+from src.app.live import build_parser
+from src.app.rendering.live import build_page
+from src.app.service import RecognitionService
+from src.app.sessions import RecognitionBusyError, SessionRegistry
+from src.config.live import MAXIMUM_SESSIONS
+from src.core.audio.realtime import TranscriptionUpdate
+from src.core.contracts import FaceBox, Word
 
 
-class LiveViewerTest(unittest.TestCase):
-    def test_page_has_local_capture_current_highlights_and_collapsible_transcript(
-        self,
-    ) -> None:
-        page = build_page(4_000)
-        self.assertIn('id="camera"', page)
-        self.assertIn('id="faces"', page)
-        self.assertIn("SVG_NAMESPACE", page)
-        self.assertIn("person.contour", page)
-        self.assertIn("event.color", page)
-        self.assertIn("line.style.color", page)
-        self.assertIn('id="transcript-panel"', page)
-        self.assertIn('classList.toggle("collapsed")', page)
-        self.assertNotIn('id="result"', page)
-        self.assertNotIn("playbackQueue", page)
-        self.assertIn("activeEvents", page)
-        self.assertIn("X-Whisper-Language", page)
-        self.assertNotIn("SpeechRecognition", page)
-        self.assertNotIn("number !== chunkNumber", page)
-        self.assertIn("pendingClips", page)
-        self.assertIn("navigator.language", page)
-
-    def test_server_language_sets_the_browser_transcript_language(self) -> None:
-        page = build_page(2_000, "it")
-        self.assertIn('"language": "it"', page)
-        self.assertIn("languageSelect.value = configuration.language", page)
-
-    def test_chunk_duration_has_a_safe_range(self) -> None:
-        parser = build_parser()
-        self.assertEqual(parser.parse_args([]).chunk_seconds, 4)
-
-    def test_camera_recording_is_normalized_before_recognition(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
-        expected_info = MediaInfo(1.0, 640, 360, 25.0, True, True)
-        expected_tracks = [
-            FaceTrack("face-1", 0.0, 1.0, [FaceBox(0.0, 100, 50, 40, 40)])
-        ]
-        expected_events = [
-            CaptionEvent(0.0, 1.0, "Person 1", "face-1", "hello", 0.9, "visible")
-        ]
-        with (
-            patch("src.live.normalize_camera_recording") as normalize,
-            patch("src.live.extract_audio"),
-            patch("src.live.inspect_media", return_value=expected_info),
-            patch("src.live.load_faster_whisper_model", return_value=object()),
-            patch(
-                "src.live.recognize",
-                return_value=(expected_info, expected_tracks, expected_events, [], []),
-            ) as recognize,
-        ):
-            result = service.recognize_clip(b"camera recording")
-
-        normalized_path = normalize.call_args.args[1]
-        self.assertEqual(normalized_path.name, "recording.mp4")
-        self.assertEqual(recognize.call_args.args[0], normalized_path)
-        self.assertEqual(result["events"][0]["text"], "hello")
-        self.assertEqual(result["events"][0]["color"], "#38bdf8")
-        self.assertEqual(result["tracks"][0]["boxes"][0]["bodyBox"]["width"], 120)
-        self.assertTrue(recognize.call_args.kwargs["live"])
-        self.assertIs(
-            recognize.call_args.kwargs["track_labels"],
-            service.session("legacy").track_labels,
+class LiveServiceTest(unittest.TestCase):
+    def setUp(self):
+        self.service = RecognitionService("it", Path("models"))
+        self.service.models = Mock()
+        self.service.start_session("camera", "it")
+        self.decoder = Mock()
+        self.decoder.accept.return_value = TranscriptionUpdate(
+            [Word("ciao", 0.1, 0.4, 0.95)], ""
         )
+        with self.service.registry.use("camera") as session:
+            session.transcriber = self.decoder
+        self.pcm = np.full(1600, 1600, dtype="<i2").tobytes()
+        self.addCleanup(self.service.close)
 
-    def test_busy_recognizer_does_not_queue_a_stale_camera_segment(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
-        service.lock.acquire()
+    def recognize(self, **options):
+        defaults = dict(
+            language="it",
+            session_id="camera",
+            capture_offset=0.0,
+            final=False,
+            job_id="1",
+        )
+        return self.service.recognize_audio(self.pcm, **(defaults | options))
+
+    def test_audio_transcribes_without_camera_or_activity_requests(self):
+        result = self.recognize()
+        self.assertEqual(result["events"][0]["text"], "ciao")
+        self.assertEqual(result["events"][0]["state"], "uncertain")
+        self.decoder.accept.assert_called_once_with(self.pcm, False)
+        self.assertNotIn("tracks", result)
+
+    def test_audio_activity_and_vision_finish_while_transcription_is_blocked(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow_decode(*arguments):
+            started.set()
+            if not release.wait(3):
+                raise RuntimeError("test decoder timeout")
+            return TranscriptionUpdate([], "ciao")
+
+        self.decoder.accept.side_effect = slow_decode
+        thread = threading.Thread(target=self.recognize)
+        thread.start()
+        self.assertTrue(started.wait(1))
         try:
-            with self.assertRaises(RecognitionBusyError):
-                service.recognize_clip(b"camera recording")
+            activity = self.service.update_activity(self.pcm, "camera", 0.1)
+            with self.service.registry.use("camera") as session:
+                session.detector = Mock()
+                session.detector.detect.return_value = (
+                    640,
+                    360,
+                    [(FaceBox(0.1, 10, 10, 20, 20), 0.1)],
+                )
+            geometry = self.service.track_frame(b"image", "camera", 0.1)
+            self.assertIn("speaker", activity)
+            self.assertEqual(len(geometry["faces"]), 1)
+            self.assertTrue(thread.is_alive())
         finally:
-            service.lock.release()
+            release.set()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
 
-    def test_session_identity_and_transcript_context_are_isolated(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
-        first = service.session("first")
-        second = service.session("second")
-        first.track_labels["face"] = "Person 1"
-        first.prompt = "Previous speech"
-        self.assertEqual(second.track_labels, {})
-        self.assertEqual(second.prompt, "")
-        self.assertIs(service.session("first"), first)
+    def test_transcription_finishes_while_camera_inference_is_blocked(self):
+        started, release = threading.Event(), threading.Event()
 
-    def test_retried_job_returns_same_result_without_repeating_inference(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
-        with patch.object(
-            service, "_recognize_clip", return_value={"events": []}
-        ) as recognizer:
-            first = service.recognize_clip(
-                b"recording", session_id="camera", job_id="1"
-            )
-            second = service.recognize_clip(
-                b"recording", session_id="camera", job_id="1"
-            )
-        self.assertEqual(first, second)
-        self.assertEqual(recognizer.call_count, 1)
+        def slow_camera(*arguments):
+            started.set()
+            if not release.wait(3):
+                raise RuntimeError("test camera timeout")
+            return 640, 360, []
 
-    def test_word_crossing_commit_boundary_remains_available_for_next_update(
-        self,
-    ) -> None:
-        service = RecognitionService("base", "it", Path("models"))
-        info = MediaInfo(4.0, 640, 360, 25.0, True, True)
-        words = [Word("boundary", 2.8, 3.4, 0.9)]
-        with (
-            patch("src.live.normalize_camera_recording"),
-            patch("src.live.extract_audio"),
-            patch("src.live.inspect_media", return_value=info),
-            patch("src.live.load_faster_whisper_model", return_value=object()),
-            patch("src.live.recognize", return_value=(info, [], [], [], words)),
-        ):
-            result = service.recognize_clip(
-                b"recording", session_id="camera", final=False
-            )
-        self.assertEqual(result["provisionalText"], "boundary")
-        self.assertEqual(result["committedUntil"], 2.8)
+        with self.service.registry.use("camera") as session:
+            session.detector = Mock()
+            session.detector.detect.side_effect = slow_camera
+        thread = threading.Thread(
+            target=self.service.track_frame, args=(b"image", "camera", 0.1)
+        )
+        thread.start()
+        self.assertTrue(started.wait(1))
+        try:
+            result = self.recognize()
+            self.assertEqual(result["events"][0]["text"], "ciao")
+            self.assertTrue(thread.is_alive())
+        finally:
+            release.set()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
 
-    def test_ended_sessions_release_trackers_and_capacity_for_restarting(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
-        tracker = Mock()
-        service.session("camera").tracker = tracker
-        service.close_session("camera")
-        service.close_session("camera")
-        tracker.close.assert_called_once()
-        self.assertNotIn("camera", service.sessions)
-        for number in range(MAXIMUM_SESSIONS + 1):
-            session_id = f"camera-{number}"
-            service.session(session_id)
-            service.close_session(session_id)
-        self.assertEqual(service.sessions, {})
+    def test_busy_decoder_does_not_enqueue_stale_audio(self):
+        with self.service.registry.use("camera") as session:
+            session.audio_lock.acquire()
+            try:
+                with self.assertRaises(RecognitionBusyError):
+                    self.recognize()
+            finally:
+                session.audio_lock.release()
 
-    def test_ending_a_session_rejects_invalid_identifiers(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
+    def test_retry_does_not_feed_same_pcm_twice(self):
+        first = self.recognize()
+        self.assertEqual(self.recognize(), first)
+        self.assertEqual(self.decoder.accept.call_count, 1)
+
+    def test_partial_text_is_delivered_before_final_word_timestamps(self):
+        self.decoder.accept.return_value = TranscriptionUpdate([], "ciao")
+        result = self.recognize()
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["provisionalText"], "ciao")
+        self.assertEqual(result["acknowledgedUntil"], 0.1)
+        self.decoder.accept.return_value = TranscriptionUpdate(
+            [Word("ciao", 0.0, 0.1, 0.9)], ""
+        )
+        result = self.service.recognize_audio(b"", "it", "camera", 0.1, True, "2")
+        self.assertEqual(result["events"][0]["text"], "ciao")
+        self.decoder.accept.assert_called_with(b"", True)
+
+    def test_audio_gaps_or_overlapping_replays_are_rejected(self):
+        self.recognize()
+        for offset in (0.0, 0.2):
+            with self.assertRaises(ValueError):
+                self.recognize(capture_offset=offset, job_id="2")
+        self.recognize(capture_offset=0.1, job_id="2")
+        self.assertEqual(self.decoder.accept.call_count, 2)
+
+    def test_language_is_fixed_per_session(self):
         with self.assertRaises(ValueError):
-            service.close_session("../camera")
+            self.recognize(language="en")
+        with self.assertRaises(ValueError):
+            self.service.start_session("camera", "en")
 
-    def test_warm_up_loads_the_transcription_model_before_capture(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
+    def test_audio_must_be_prepared_before_capture(self):
+        with self.assertRaises(ValueError):
+            self.recognize(session_id="unprepared")
+
+    def test_ended_audio_cannot_accept_more_packets(self):
+        self.recognize(final=True)
+        with self.assertRaises(ValueError):
+            self.recognize(capture_offset=0.1, job_id="2")
+
+    def test_end_waits_for_active_requests_and_releases_detector(self):
+        with self.service.registry.use("camera") as session:
+            detector = Mock()
+            session.detector = detector
+            with self.assertRaises(RecognitionBusyError):
+                self.service.close_session("camera")
+        self.service.close_session("camera")
+        self.service.close_session("camera")
+        detector.close.assert_called_once()
+
+    def test_capacity_and_invalid_identifiers(self):
+        registry = SessionRegistry()
+        for index in range(MAXIMUM_SESSIONS):
+            with registry.use(f"camera-{index}"):
+                pass
+        with self.assertRaises(RecognitionBusyError), registry.use("extra"):
+            pass
+        registry.end("camera-0")
+        with registry.use("extra"):
+            pass
+        with self.assertRaises(ValueError), registry.use("../camera"):
+            pass
+        registry.close()
+
+    def test_startup_warms_only_the_streaming_decoder_and_face_models(self):
         with (
-            patch("src.live.load_faster_whisper_model", return_value=Mock()) as loader,
-            patch("src.live.warm_up_activity_model") as activity_loader,
-            patch("src.live.warm_up_speaker_model") as speaker_loader,
-            patch("src.live.warm_up_person_model") as person_loader,
+            patch("src.app.service.StreamingTranscriber") as decoder,
+            patch("src.app.service.LiveFaceDetector") as detector,
         ):
-            service.warm_up()
-        self.assertIsNotNone(service.transcription_model)
-        loader.assert_called_once()
-        loader.return_value.transcribe.assert_called_once()
-        activity_loader.assert_called_once()
-        speaker_loader.assert_called_once()
-        person_loader.assert_called_once_with(Path("models"))
+            self.service.warm_up()
+        decoder.return_value.accept.assert_called_once()
+        detector.return_value.detect.assert_called_once()
+        detector.return_value.close.assert_called_once()
 
-    def test_activity_backend_failure_falls_back_before_capture(self) -> None:
-        service = RecognitionService(
-            "base", None, Path("models"), activity_device="mps"
-        )
+    def test_camera_warmup_failure_does_not_stop_microphone_startup(self):
         with (
-            patch("src.live.load_faster_whisper_model", return_value=Mock()),
+            patch("src.app.service.StreamingTranscriber"),
             patch(
-                "src.live.warm_up_activity_model",
-                side_effect=[RuntimeError("unsupported GPU operation"), None],
-            ) as activity_loader,
-            patch("src.live.warm_up_speaker_model"),
-            patch("src.live.warm_up_person_model"),
-            self.assertLogs("src.live", level="ERROR"),
+                "src.app.service.LiveFaceDetector",
+                side_effect=RuntimeError("camera unavailable"),
+            ),
+            self.assertLogs("src.app.service", level="WARNING"),
         ):
-            service.warm_up()
-        self.assertEqual(service.activity_device, "cpu")
-        self.assertEqual(
-            [call.args[1] for call in activity_loader.call_args_list], ["mps", "cpu"]
-        )
+            self.service.warm_up()
+        self.assertEqual(self.recognize()["events"][0]["text"], "ciao")
 
-    def test_face_tracks_keep_their_live_identity_between_windows(self) -> None:
-        service = RecognitionService("base", None, Path("models"))
-        first_track = FaceTrack("face-1", 0.0, 1.0, [FaceBox(1.0, 100, 50, 40, 40)])
-        next_track = FaceTrack("face-1", 0.0, 1.0, [FaceBox(1.0, 102, 50, 40, 40)])
-        service._stabilize_tracks([first_track])
-        service._stabilize_tracks([next_track])
-        self.assertEqual(
-            [first_track.track_id, next_track.track_id], ["live-face-1", "live-face-1"]
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_page_and_cli_use_short_independent_capture(self):
+        page = build_page(100, "it")
+        self.assertIn('"language": "it"', page)
+        self.assertIn("/audio-buffer.js", page)
+        self.assertIn('id="speaker-state"', page)
+        self.assertNotIn("MediaRecorder", page)
+        self.assertEqual(build_parser().parse_args([]).chunk_seconds, 0.1)
+        self.assertNotIn("</script><evil>", build_page(100, "</script><evil>"))

@@ -5,10 +5,10 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from src import vision
-from src.contracts import FaceBox
-from src.media import VideoFrame
-from src.vision import _track_detections, analyze_faces
+from src.core.contracts import FaceBox
+from src.core.media import VideoFrame
+from src.core.vision import faces as vision
+from src.core.vision.faces import _track_detections, analyze_faces
 
 
 class VisionTest(unittest.TestCase):
@@ -27,11 +27,11 @@ class VisionTest(unittest.TestCase):
         ]
         with (
             patch(
-                "src.vision.mp.solutions.face_detection.FaceDetection",
+                "src.core.vision.faces.mp.solutions.face_detection.FaceDetection",
                 return_value=detector,
             ) as factory,
-            patch("src.vision._download_model_if_missing") as download,
-            patch("src.vision._cascade_detections") as cascade,
+            patch("src.core.vision.faces._download_model_if_missing") as download,
+            patch("src.core.vision.faces._cascade_detections") as cascade,
         ):
             first = analyze_faces(
                 frames, Path("unused.task"), 2, 0.0, use_face_detector=True
@@ -58,10 +58,10 @@ class VisionTest(unittest.TestCase):
         detector.process.return_value = SimpleNamespace(detections=None)
         with (
             patch(
-                "src.vision.mp.solutions.face_detection.FaceDetection",
+                "src.core.vision.faces.mp.solutions.face_detection.FaceDetection",
                 return_value=detector,
             ),
-            patch("src.vision._cascade_detections") as cascade,
+            patch("src.core.vision.faces._cascade_detections") as cascade,
         ):
             tracks = analyze_faces(
                 frames, Path("unused.task"), 1, 0.0, use_face_detector=True
@@ -82,8 +82,10 @@ class VisionTest(unittest.TestCase):
             ]
 
         with (
-            patch("src.vision._download_model_if_missing"),
-            patch("src.vision._landmarker_detections", side_effect=detect) as detector,
+            patch("src.core.vision.faces._download_model_if_missing"),
+            patch(
+                "src.core.vision.faces._landmarker_detections", side_effect=detect
+            ) as detector,
         ):
             tracks = analyze_faces(frames, Path("face_landmarker.task"), 2, 0.0)
 
@@ -103,12 +105,12 @@ class VisionTest(unittest.TestCase):
             return [FaceBox(frame.timestamp, 10, 10, 20, 20)]
 
         with (
-            patch("src.vision._download_model_if_missing"),
+            patch("src.core.vision.faces._download_model_if_missing"),
             patch(
-                "src.vision._landmarker_detections",
+                "src.core.vision.faces._landmarker_detections",
                 return_value=[[FaceBox(0.0, 10, 10, 20, 20)]] + [[]] * 15,
             ),
-            patch("src.vision._cascade_detections", side_effect=cascade),
+            patch("src.core.vision.faces._cascade_detections", side_effect=cascade),
         ):
             tracks = analyze_faces(frames, Path("face_landmarker.task"))
 

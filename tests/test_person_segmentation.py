@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.person_segmentation import (
+from src.core.vision.person_segmentation import (
     PERSON_MODEL_FILENAME,
     PersonSegmenter,
     decode_person_masks,
@@ -18,7 +18,9 @@ class PersonSegmentationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             model_directory = Path(directory)
             (model_directory / PERSON_MODEL_FILENAME).write_bytes(b"corrupt weights")
-            with patch("src.person_segmentation.cv2.dnn.readNetFromONNX") as loader:
+            with patch(
+                "src.core.vision.person_segmentation.cv2.dnn.readNetFromONNX"
+            ) as loader:
                 with self.assertRaisesRegex(RuntimeError, "checksum"):
                     PersonSegmenter(model_directory)
             loader.assert_not_called()

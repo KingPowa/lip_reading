@@ -4,13 +4,15 @@ import re
 from collections import defaultdict
 from dataclasses import replace
 
-from .config import ACTIVE_SPEAKER_THRESHOLD, ASSIGNMENT_MARGIN
-from .contracts import CaptionEvent, FaceActivity, FaceTrack, SpeakerTurn, Word
-
-OFF_SCREEN_SPEAKER = "Off-screen speaker"
-UNCERTAIN_SPEAKER = "Uncertain speaker"
-DEFAULT_SPEECH_TEXT = "[speech detected]"
-MAXIMUM_WORD_GAP_SECONDS = 0.4
+from src.config.tracking import (
+    ACTIVE_SPEAKER_THRESHOLD,
+    ASSIGNMENT_MARGIN,
+    DEFAULT_SPEECH_TEXT,
+    MAXIMUM_WORD_GAP_SECONDS,
+    OFF_SCREEN_SPEAKER,
+    UNCERTAIN_SPEAKER,
+)
+from src.core.contracts import CaptionEvent, FaceActivity, FaceTrack, SpeakerTurn, Word
 
 
 def associate_speakers(
@@ -66,10 +68,10 @@ def associate_speakers(
             )
         )
     events = _disambiguate_overlaps(events)
-    return _merge_word_events(events) if prefer_track_labels or merge_words else events
+    return merge_word_events(events) if prefer_track_labels or merge_words else events
 
 
-def _merge_word_events(events: list[CaptionEvent]) -> list[CaptionEvent]:
+def merge_word_events(events: list[CaptionEvent]) -> list[CaptionEvent]:
     merged: list[CaptionEvent] = []
     for event in events:
         previous = merged[-1] if merged else None

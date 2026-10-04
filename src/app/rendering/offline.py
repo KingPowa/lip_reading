@@ -10,20 +10,21 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .colors import speaker_color_bgr
-from .config import (
+from src.app.rendering.colors import speaker_color_bgr
+from src.app.rendering.payloads import caption_payload
+from src.config.rendering import (
+    BODY_HIGHLIGHT_OPACITY,
+    CAPTION_BACKGROUND,
     CAPTION_FONT_PATH,
     CAPTION_FONT_SIZE,
     CAPTION_HORIZONTAL_MARGIN,
     CAPTION_LINE_HEIGHT,
 )
-from .contracts import CaptionEvent, FaceTrack
-from .media import video_presentation_timestamps
-from .vision import body_box, box_at
+from src.core.contracts import CaptionEvent, FaceTrack
+from src.core.media import video_presentation_timestamps
+from src.core.vision.faces import body_box, box_at
 
 LOGGER = logging.getLogger(__name__)
-CAPTION_BACKGROUND = (0, 0, 0)
-BODY_HIGHLIGHT_OPACITY = 0.20
 
 VIEWER_STYLE = """
 <style>
@@ -109,7 +110,8 @@ def write_events(path: Path, events: list[CaptionEvent]) -> None:
         events: Caption events to serialize.
     """
     path.write_text(
-        json.dumps([event.as_json() for event in events], indent=2), encoding="utf-8"
+        json.dumps([caption_payload(event) for event in events], indent=2),
+        encoding="utf-8",
     )
 
 
@@ -150,7 +152,7 @@ def write_viewer(
             for track in track_payloads(tracks, width, height)
             if track["track_id"] in active_track_ids
         ],
-        "events": [event.as_json() for event in events],
+        "events": [caption_payload(event) for event in events],
     }
     page = "\n".join(
         (

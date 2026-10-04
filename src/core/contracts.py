@@ -1,8 +1,6 @@
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .colors import speaker_color
-
 
 @dataclass(frozen=True)
 class FaceBox:
@@ -13,6 +11,13 @@ class FaceBox:
     y: int
     width: int
     height: int
+
+
+@dataclass(frozen=True)
+class LiveFace:
+    track_id: str
+    box: FaceBox
+    mouth_motion: float
 
 
 @dataclass
@@ -75,5 +80,4 @@ class CaptionEvent:
         """
         data = asdict(self)
         data["faceTrack"] = data.pop("face_track")
-        data["color"] = speaker_color(self.speaker)
         return data

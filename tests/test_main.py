@@ -4,10 +4,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.contracts import FaceActivity, FaceBox, FaceTrack, SpeakerTurn, Word
-from src.main import recognize
-from src.media import MediaInfo
-from src.speech import diarize_turns
+from src.app.offline import recognize
+from src.core.audio.speech import diarize_turns
+from src.core.contracts import FaceActivity, FaceBox, FaceTrack, SpeakerTurn, Word
+from src.core.media import MediaInfo
 
 
 class LiveVoiceIdentityTest(unittest.TestCase):
@@ -20,29 +20,32 @@ class LiveVoiceIdentityTest(unittest.TestCase):
         ]
         with (
             patch(
-                "src.main.inspect_media",
+                "src.app.offline.inspect_media",
                 return_value=MediaInfo(2.0, 20, 10, 25.0, True, True),
             ),
-            patch("src.main.read_video_frames", return_value=[]),
+            patch("src.app.offline.read_video_frames", return_value=[]),
             patch(
-                "src.main.transcribe_speech",
+                "src.app.offline.transcribe_speech",
                 return_value=(
                     [SpeakerTurn("one-whisper-segment", 0.0, 2.0, 0.9)],
                     [Word("first", 0.0, 0.9, 0.9), Word("second", 1.0, 1.9, 0.9)],
                 ),
             ),
-            patch("src.main.analyze_faces", return_value=tracks),
+            patch("src.app.offline.analyze_faces", return_value=tracks),
             patch(
-                "src.main.score_face_activity",
+                "src.app.offline.score_face_activity",
                 return_value=[
                     FaceActivity("first-face", 0.0, 1.0, 0.9),
                     FaceActivity("second-face", 1.0, 2.0, 0.9),
                 ],
             ),
-            patch("src.speech._audio_samples", return_value=(np.zeros(32_000), 16_000)),
-            patch("src.speech._speaker_classifier", return_value=object()),
             patch(
-                "src.speech._turn_embedding",
+                "src.core.audio.speech._audio_samples",
+                return_value=(np.zeros(32_000), 16_000),
+            ),
+            patch("src.core.audio.speech._speaker_classifier", return_value=object()),
+            patch(
+                "src.core.audio.speech._turn_embedding",
                 side_effect=[np.array([1.0, 0.0]), np.array([0.0, 1.0])],
             ),
         ):
@@ -65,11 +68,14 @@ class LiveVoiceIdentityTest(unittest.TestCase):
             with (
                 self.subTest(preserve_visual_identity=preserve_visual_identity),
                 patch(
-                    "src.speech._audio_samples", return_value=(np.zeros(32_000), 16_000)
+                    "src.core.audio.speech._audio_samples",
+                    return_value=(np.zeros(32_000), 16_000),
                 ),
-                patch("src.speech._speaker_classifier", return_value=object()),
                 patch(
-                    "src.speech._turn_embedding",
+                    "src.core.audio.speech._speaker_classifier", return_value=object()
+                ),
+                patch(
+                    "src.core.audio.speech._turn_embedding",
                     side_effect=[np.array([1.0, 0.0]), None],
                 ),
             ):
@@ -106,24 +112,30 @@ class LiveVoiceIdentityTest(unittest.TestCase):
             with (
                 self.subTest(expected_state=expected_state),
                 patch(
-                    "src.main.inspect_media",
+                    "src.app.offline.inspect_media",
                     return_value=MediaInfo(1.0, 20, 10, 25.0, True, True),
                 ),
-                patch("src.main.read_video_frames", return_value=[]),
+                patch("src.app.offline.read_video_frames", return_value=[]),
                 patch(
-                    "src.main.transcribe_speech",
+                    "src.app.offline.transcribe_speech",
                     return_value=(
                         [SpeakerTurn("voice", 0.0, 1.0, 0.9)],
                         [Word("hello", 0.0, 0.9, 0.9)],
                     ),
                 ),
-                patch("src.main.analyze_faces", return_value=tracks),
-                patch("src.main.score_face_activity", return_value=activities),
+                patch("src.app.offline.analyze_faces", return_value=tracks),
+                patch("src.app.offline.score_face_activity", return_value=activities),
                 patch(
-                    "src.speech._audio_samples", return_value=(np.zeros(16_000), 16_000)
+                    "src.core.audio.speech._audio_samples",
+                    return_value=(np.zeros(16_000), 16_000),
                 ),
-                patch("src.speech._speaker_classifier", return_value=object()),
-                patch("src.speech._turn_embedding", return_value=np.array([1.0, 0.0])),
+                patch(
+                    "src.core.audio.speech._speaker_classifier", return_value=object()
+                ),
+                patch(
+                    "src.core.audio.speech._turn_embedding",
+                    return_value=np.array([1.0, 0.0]),
+                ),
             ):
                 _, _, events, _, _ = recognize(
                     Path("clip.mp4"), Path("audio.wav"), live=True, speaker_centroids=[]
@@ -140,16 +152,16 @@ class LiveVoiceIdentityTest(unittest.TestCase):
         ]
         with (
             patch(
-                "src.main.inspect_media",
+                "src.app.offline.inspect_media",
                 return_value=MediaInfo(4.0, 10, 10, 25.0, True, True),
             ),
-            patch("src.main.read_video_frames", return_value=[]),
+            patch("src.app.offline.read_video_frames", return_value=[]),
             patch(
-                "src.main.transcribe_speech",
+                "src.app.offline.transcribe_speech",
                 return_value=([SpeakerTurn("voice", 0, 4, 0.9)], words),
             ),
-            patch("src.main.analyze_faces", return_value=[]),
-            patch("src.main.score_face_activity", return_value=[]),
+            patch("src.app.offline.analyze_faces", return_value=[]),
+            patch("src.app.offline.score_face_activity", return_value=[]),
         ):
             _, _, events, _, _ = recognize(
                 Path("clip.mp4"),
@@ -169,27 +181,33 @@ class LiveVoiceIdentityTest(unittest.TestCase):
             track = FaceTrack(track_id, 0.0, 1.0, [FaceBox(0.0, 0, 0, 10, 10)])
             with (
                 patch(
-                    "src.main.inspect_media",
+                    "src.app.offline.inspect_media",
                     return_value=MediaInfo(1.0, 10, 10, 25.0, True, True),
                 ),
-                patch("src.main.read_video_frames", return_value=[]),
+                patch("src.app.offline.read_video_frames", return_value=[]),
                 patch(
-                    "src.main.transcribe_speech",
+                    "src.app.offline.transcribe_speech",
                     return_value=(
                         [SpeakerTurn("initial-voice", 0.0, 1.0, 0.9)],
                         [Word("hello", 0.1, 0.8, 0.9)],
                     ),
                 ),
-                patch("src.main.analyze_faces", return_value=[track]),
+                patch("src.app.offline.analyze_faces", return_value=[track]),
                 patch(
-                    "src.main.score_face_activity",
+                    "src.app.offline.score_face_activity",
                     return_value=[FaceActivity(track_id, 0.0, 1.0, 0.9)],
                 ),
                 patch(
-                    "src.speech._audio_samples", return_value=(np.zeros(16_000), 16_000)
+                    "src.core.audio.speech._audio_samples",
+                    return_value=(np.zeros(16_000), 16_000),
                 ),
-                patch("src.speech._speaker_classifier", return_value=object()),
-                patch("src.speech._turn_embedding", return_value=np.array([1.0, 0.0])),
+                patch(
+                    "src.core.audio.speech._speaker_classifier", return_value=object()
+                ),
+                patch(
+                    "src.core.audio.speech._turn_embedding",
+                    return_value=np.array([1.0, 0.0]),
+                ),
             ):
                 _, _, events, _, _ = recognize(
                     Path("recording.mp4"),
@@ -216,12 +234,12 @@ class LiveVoiceIdentityTest(unittest.TestCase):
         ]
         with (
             patch(
-                "src.main.inspect_media",
+                "src.app.offline.inspect_media",
                 return_value=MediaInfo(2.0, 20, 10, 25.0, True, True),
             ),
-            patch("src.main.read_video_frames", return_value=[]),
+            patch("src.app.offline.read_video_frames", return_value=[]),
             patch(
-                "src.main.transcribe_speech",
+                "src.app.offline.transcribe_speech",
                 return_value=(
                     [
                         SpeakerTurn("initial-voice", 0.0, 1.0, 0.9),
@@ -230,18 +248,21 @@ class LiveVoiceIdentityTest(unittest.TestCase):
                     words,
                 ),
             ),
-            patch("src.main.analyze_faces", return_value=tracks),
+            patch("src.app.offline.analyze_faces", return_value=tracks),
             patch(
-                "src.main.score_face_activity",
+                "src.app.offline.score_face_activity",
                 return_value=[
                     FaceActivity("face-1", 0.0, 1.0, 0.9),
                     FaceActivity("face-2", 1.0, 2.0, 0.9),
                 ],
             ),
-            patch("src.speech._audio_samples", return_value=(np.zeros(32_000), 16_000)),
-            patch("src.speech._speaker_classifier", return_value=object()),
             patch(
-                "src.speech._turn_embedding",
+                "src.core.audio.speech._audio_samples",
+                return_value=(np.zeros(32_000), 16_000),
+            ),
+            patch("src.core.audio.speech._speaker_classifier", return_value=object()),
+            patch(
+                "src.core.audio.speech._turn_embedding",
                 side_effect=[np.array([1.0, 0.0]), np.array([0.0, 1.0])],
             ),
         ):

@@ -11,27 +11,27 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 
-from .config import (
+from src.config.models import FACE_LANDMARKER_URL
+from src.config.vision import (
     ANALYSIS_FRAME_INTERVAL,
-    FACE_LANDMARKER_URL,
+    BODY_HEIGHT_TO_FACE_RATIO,
+    BODY_TOP_OFFSET_RATIO,
+    BODY_WIDTH_TO_FACE_RATIO,
+    CASCADE_MINIMUM_NEIGHBORS,
+    CASCADE_MINIMUM_SIZE,
+    CASCADE_SCALE_FACTOR,
+    DEFAULT_FRAME_DURATION,
+    FACE_DETECTION_CONFIDENCE,
+    FACE_DETECTION_MODEL,
     FACE_TRACK_IOU_THRESHOLD,
     MINIMUM_TRACK_DETECTIONS,
     MINIMUM_TRACK_DURATION_SECONDS,
     MISSING_FACE_LIMIT,
 )
-from .contracts import FaceBox, FaceTrack
-from .media import VideoFrame
+from src.core.contracts import FaceBox, FaceTrack
+from src.core.media import VideoFrame
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_FRAME_DURATION = 0.04
-CASCADE_SCALE_FACTOR = 1.05
-CASCADE_MINIMUM_NEIGHBORS = 2
-CASCADE_MINIMUM_SIZE = (30, 30)
-BODY_WIDTH_TO_FACE_RATIO = 3
-BODY_HEIGHT_TO_FACE_RATIO = 4
-BODY_TOP_OFFSET_RATIO = 3
-FACE_DETECTION_CONFIDENCE = 0.5
-FACE_DETECTION_MODEL = 1
 FACE_DETECTOR_LOCK = threading.Lock()
 
 

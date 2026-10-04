@@ -14,20 +14,22 @@ import torch
 from python_speech_features import mfcc
 from torch import nn
 
-from .config import LIGHT_ASD_URL
-from .contracts import FaceActivity, FaceTrack
-from .media import VideoFrame
-from .vision import box_at
+from src.config.models import LIGHT_ASD_URL
+from src.config.vision import (
+    FACE_CROP_SIZE,
+    FACE_PADDING_RATIO,
+    FRAME_DURATION,
+    MAXIMUM_FRAMES_PER_BATCH,
+    MFCC_FEATURE_COUNT,
+    MFCCS_PER_FRAME,
+    MODEL_FACE_SIZE,
+    TARGET_FRAME_RATE,
+)
+from src.core.contracts import FaceActivity, FaceTrack
+from src.core.media import VideoFrame
+from src.core.vision.faces import box_at
 
 LOGGER = logging.getLogger(__name__)
-TARGET_FRAME_RATE = 25
-FRAME_DURATION = 1 / TARGET_FRAME_RATE
-FACE_PADDING_RATIO = 0.40
-FACE_CROP_SIZE = 224
-MODEL_FACE_SIZE = 112
-MFCCS_PER_FRAME = 4
-MFCC_FEATURE_COUNT = 13
-MAXIMUM_FRAMES_PER_BATCH = 500
 
 
 class _AudioBlock(nn.Module):
