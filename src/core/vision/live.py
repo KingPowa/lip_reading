@@ -3,14 +3,16 @@
 import math
 import threading
 from io import BytesIO
+from pathlib import Path
 
 import cv2
-import mediapipe as mediapipe
+import mediapipe
 import numpy as np
 from PIL import Image
 
 from src.config.live import (
     FACE_CROP_PADDING_RATIO,
+    LEFT_EYE_KEYPOINT,
     LIVE_FACE_DETECTION_CONFIDENCE,
     MAXIMUM_FRAME_HEIGHT,
     MAXIMUM_FRAME_PIXELS,
@@ -21,17 +23,22 @@ from src.config.live import (
     MOUTH_LOWER_LANDMARK,
     MOUTH_RIGHT_LANDMARK,
     MOUTH_UPPER_LANDMARK,
+    RIGHT_EYE_KEYPOINT,
+    ROLL_CORRECTION_THRESHOLD_DEGREES,
 )
+from src.config.models import MODEL_DIRECTORY
 from src.config.vision import FACE_DETECTION_MODEL
-from src.core.contracts import FaceBox
+from src.core.contracts import FaceBox, FaceObservation
+from src.core.vision.face_identity import face_identity_encoder
 from src.core.vision.faces import detection_box
 
 
 class LiveFaceDetector:
-    """Reuse the bundled face mesh; no downloads or person segmentation."""
+    """Reuse face detection, mouth landmarks, and a local identity encoder."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_directory: Path = MODEL_DIRECTORY) -> None:
         self.lock = threading.Lock()
+        self.identity_encoder = face_identity_encoder(model_directory)
         self.detector = mediapipe.solutions.face_detection.FaceDetection(
             model_selection=FACE_DETECTION_MODEL,
             min_detection_confidence=LIVE_FACE_DETECTION_CONFIDENCE,
@@ -44,7 +51,7 @@ class LiveFaceDetector:
 
     def detect(
         self, content: bytes, timestamp: float
-    ) -> tuple[int, int, list[tuple[FaceBox, float | None]]]:
+    ) -> tuple[int, int, list[FaceObservation]]:
         if not math.isfinite(timestamp) or timestamp < 0:
             raise ValueError("frame timestamp must be finite and nonnegative")
         try:
@@ -91,22 +98,47 @@ class LiveFaceDetector:
                 crop = image[top:bottom, left:right]
                 if not crop.size:
                     continue
+                crop = upright_crop(crop, detection, width, height)
                 result = self.model.process(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
                 aperture = None
+                features = None
                 if result.multi_face_landmarks:
+                    landmarks = result.multi_face_landmarks[0].landmark
                     _, aperture = face_observation(
-                        result.multi_face_landmarks[0].landmark,
+                        landmarks,
                         timestamp,
                         right - left,
                         bottom - top,
                     )
-                observations.append((box, aperture))
+                    features = self.identity_encoder.encode(crop, landmarks)
+                observations.append(FaceObservation(box, aperture, features))
         return width, height, observations
 
     def close(self) -> None:
         with self.lock:
             self.model.close()
             self.detector.close()
+
+
+def face_roll_degrees(detection, width: int, height: int) -> float:
+    keypoints = getattr(detection.location_data, "relative_keypoints", ())
+    if len(keypoints) <= max(RIGHT_EYE_KEYPOINT, LEFT_EYE_KEYPOINT):
+        return 0.0
+    right_eye, left_eye = keypoints[RIGHT_EYE_KEYPOINT], keypoints[LEFT_EYE_KEYPOINT]
+    return math.degrees(
+        math.atan2((left_eye.y - right_eye.y) * height, (left_eye.x - right_eye.x) * width)
+    )
+
+
+def upright_crop(crop: np.ndarray, detection, width: int, height: int) -> np.ndarray:
+    roll = face_roll_degrees(detection, width, height)
+    if not math.isfinite(roll) or abs(roll) < ROLL_CORRECTION_THRESHOLD_DEGREES:
+        return crop
+    crop_height, crop_width = crop.shape[:2]
+    matrix = cv2.getRotationMatrix2D((crop_width / 2, crop_height / 2), roll, 1.0)
+    return cv2.warpAffine(
+        crop, matrix, (crop_width, crop_height), borderMode=cv2.BORDER_REPLICATE
+    )
 
 
 def face_observation(

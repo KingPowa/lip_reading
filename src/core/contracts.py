@@ -1,5 +1,7 @@
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, NamedTuple
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -11,6 +13,12 @@ class FaceBox:
     y: int
     width: int
     height: int
+
+
+class FaceObservation(NamedTuple):
+    box: FaceBox
+    aperture: float | None
+    features: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

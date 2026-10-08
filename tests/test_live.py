@@ -29,13 +29,13 @@ class LiveServiceTest(unittest.TestCase):
         self.addCleanup(self.service.close)
 
     def recognize(self, **options):
-        defaults = dict(
-            language="it",
-            session_id="camera",
-            capture_offset=0.0,
-            final=False,
-            job_id="1",
-        )
+        defaults = {
+            "language": "it",
+            "session_id": "camera",
+            "capture_offset": 0.0,
+            "final": False,
+            "job_id": "1",
+        }
         return self.service.recognize_audio(self.pcm, **(defaults | options))
 
     def test_audio_transcribes_without_camera_or_activity_requests(self):
@@ -185,6 +185,43 @@ class LiveServiceTest(unittest.TestCase):
         decoder.return_value.accept.assert_called_once()
         detector.return_value.detect.assert_called_once()
         detector.return_value.close.assert_called_once()
+
+    def test_face_models_use_configured_model_directory(self):
+        service = RecognitionService("it", Path("custom-models"))
+        service.models = Mock()
+        self.addCleanup(service.close)
+        with (
+            patch("src.app.service.StreamingTranscriber"),
+            patch("src.app.service.LiveFaceDetector") as detector,
+        ):
+            service.warm_up()
+            detector.assert_called_with(Path("custom-models"))
+            detector.return_value.detect.return_value = (640, 480, [])
+            service.track_frame(b"image", "custom-camera", 0.1)
+            self.assertEqual(detector.call_count, 2)
+            detector.assert_called_with(Path("custom-models"))
+
+    def test_frame_payload_restores_identity_without_exposing_features(self):
+        first_features = np.array([1.0, 0.0], dtype=np.float32)
+        second_features = np.array([0.0, 1.0], dtype=np.float32)
+        with self.service.registry.use("camera") as session:
+            session.detector = Mock()
+            session.detector.detect.side_effect = [
+                (640, 480, [(FaceBox(0.1, 20, 10, 40, 40), 0.02, first_features)]),
+                (640, 480, []),
+                (640, 480, [(FaceBox(0.3, 20, 10, 40, 40), 0.02, second_features)]),
+                (640, 480, [(FaceBox(10, 300, 10, 40, 40), 0.02, first_features)]),
+            ]
+        first = self.service.track_frame(b"image", "camera", 0.1)["faces"][0]
+        self.service.update_activity(self.pcm, "camera", 0.2)
+        missing = self.service.track_frame(b"image", "camera", 0.2)
+        self.assertEqual(missing["faces"], [])
+        self.assertEqual(missing["speaker"]["state"], "off_screen")
+        second = self.service.track_frame(b"image", "camera", 0.3)["faces"][0]
+        self.assertNotEqual(second["trackId"], first["trackId"])
+        returned = self.service.track_frame(b"image", "camera", 10)["faces"][0]
+        self.assertEqual(returned["trackId"], first["trackId"])
+        self.assertNotIn("features", returned)
 
     def test_camera_warmup_failure_does_not_stop_microphone_startup(self):
         with (

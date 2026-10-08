@@ -31,6 +31,7 @@ class RecognitionService:
         speech_model: Path | None = None,
     ) -> None:
         self.language = language
+        self.model_directory = model_directory
         self.registry = SessionRegistry()
         self.models = SpeechModelStore(model_directory, speech_model)
 
@@ -42,7 +43,7 @@ class RecognitionService:
         )
         detector = None
         try:
-            detector = LiveFaceDetector()
+            detector = LiveFaceDetector(self.model_directory)
             image = cv2.imencode(".jpg", np.zeros((240, 320, 3), dtype=np.uint8))[
                 1
             ].tobytes()
@@ -81,7 +82,7 @@ class RecognitionService:
         started = time.perf_counter()
         with self.registry.use(session_id) as session, session.vision_lock:
             if session.detector is None:
-                session.detector = LiveFaceDetector()
+                session.detector = LiveFaceDetector(self.model_directory)
             width, height, observations = session.detector.detect(content, timestamp)
             with session.lock:
                 estimate = session.tracker.update_faces(observations, timestamp)

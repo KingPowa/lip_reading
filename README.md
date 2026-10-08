@@ -21,7 +21,7 @@ Open the printed address and choose **Start camera**. Select the language before
 Live mode runs three independent channels:
 
 - **Audio:** an AudioWorklet produces mono 16 kHz PCM every 100 ms. A persistent Vosk decoder consumes each packet once and returns partial text while you speak. Final text and word times enter the transcript at an utterance boundary or on Stop. A provisional transcript row updates throughout the utterance.
-- **Vision:** small current JPEGs run through face detection and mouth landmarks about ten times per second. Boxes follow rough position overlap. There is no person segmentation, ECAPA clustering, or Light-ASD inference in the live path.
+- **Vision:** small current JPEGs run through face detection, mouth landmarks, and local SFace identity embeddings about ten times per second. Session-local features restore a returning person's label after leaving the frame, including returns at a different position. Distinct feature matches take priority over box overlap. There is no person segmentation, ECAPA clustering, or Light-ASD inference in the live path.
 - **Attribution:** recent mouth movement and microphone energy select a current face. Competing evidence is `uncertain`; speech with no moving visible mouth is estimated `off_screen`. Highlights update from current evidence and continue independently of caption timing. Silence releases a highlight, and stale camera geometry expires.
 
 The one second target applies to current visual evidence and provisional recognition. Capture cadence is 100 ms; processing and freshness are measured separately. A decoder can need more acoustic context to resolve an ambiguous word, so an absolute one second guarantee for every word on every device is not established. Final utterance commitment can take longer; partial text remains visible. See [the current replay measurements](progress/06-independent-realtime.md).
@@ -29,6 +29,8 @@ The one second target applies to current visual evidence and provisional recogni
 Only one audio upload per capture runs at a time. Unacknowledged PCM remains in a bounded buffer, retries reuse the same job, and Stop flushes the worklet and decoder before releasing the session. If network or decoding falls behind by twelve seconds, capture pauses and drains retained speech. Camera and audio activity requests continue independently of a busy decoder. **Retry recognition** retains failed audio. Stale responses cannot replace evidence from another capture session.
 
 `--chunk-seconds` now controls PCM upload cadence (0.05–1 second, default 0.1). Use the default for the latency target. Live mode requires a selected language; it does not perform automatic language detection. `--speech-model /path/to/vosk-model` accepts a compatible local model. Whisper model selection belongs to the offline command. Existing `python -m src.live` and `live-speaker` entry points also work.
+
+The first live startup also downloads the 37 MB [OpenCV SFace model](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) into `models/` (or `--model-directory`) and verifies its checksum. Identity features remain in memory for the capture session, with up to 128 identities and five recent feature examples per identity; the oldest absent identities are evicted at capacity. Features are discarded with the session. Missing landmarks use short box continuity; weak or ambiguous feature matches can receive a new label. See [the identity regression checks](progress/07-live-identity.tdd.md).
 
 For access from another device, supply a trusted certificate:
 
@@ -139,7 +141,7 @@ Use this quick triage order:
 - Overlapping speech is marked when detected, but exact transcription of two people talking at once remains difficult.
 - Accurate local transcription and active-speaker scoring are computationally expensive. A long video can take significantly longer than its runtime on CPU.
 - Offline active-speaker inference receives consecutive images stored in temporary disk-backed memory maps; the full 640×360 sample needs about 9.8 GB of temporary frame storage. Live mode sends PCM and separate JPEGs up to 640×480; it does not decode video recordings.
-- Live attribution is a mouth-motion heuristic, not identity recognition or calibrated active-speaker inference. Background noise, yawning, small faces, occlusion, camera cuts, and simultaneous speech can cause uncertain or incorrect attribution. Rough box matching can change identities on crossings. Offline voice clustering remains probabilistic.
+- Live speaker attribution remains a mouth-motion heuristic rather than calibrated active-speaker inference. Face identity uses local embeddings within each capture. Background noise, yawning, small faces, occlusion, camera cuts, and simultaneous speech can cause uncertain or incorrect attribution. Poor face images, lookalikes, or missing landmarks can still change identities. Offline voice clustering remains probabilistic.
 - Words are decoded from audio; this is not a visual-to-text model for silent lip reading.
 - Burned-in captions use a Unicode-capable font, so Italian accents and apostrophes render as text instead of replacement characters.
 - The result is evidence-based, not a ground-truth transcript. Review important captions before publishing them.

@@ -18,13 +18,14 @@ from src.config.live import (
     MOUTH_MOTION_THRESHOLD,
     OFF_SCREEN_SPEAKER,
     SPEAKER_CONTINUITY_BONUS,
+    SPEAKER_HOLD_SECONDS,
+    SPEAKER_SWITCH_SECONDS,
     SPEECH_RELEASE_SECONDS,
     UNCERTAIN_SPEAKER,
 )
-from src.config.vision import FACE_TRACK_IOU_THRESHOLD
-from src.core.contracts import CaptionEvent, FaceBox, LiveFace, Word
+from src.core.contracts import CaptionEvent, FaceBox, FaceObservation, LiveFace, Word
 from src.core.tracking.association import merge_word_events
-from src.core.vision.faces import intersection_over_union
+from src.core.tracking.identity import FaceIdentityGallery
 
 
 @dataclass(frozen=True)
@@ -55,9 +56,12 @@ class RealtimeTracker:
         self.latest_vision = -1.0
         self.latest_audio = -1.0
         self.last_speech = float("-inf")
-        self.next_identity = 1
+        self.identities = FaceIdentityGallery()
         self.revision = 0
         self.active_identity: str | None = None
+        self.unmeasured: set[str] = set()
+        self.held: SpeakerEstimate | None = None
+        self.challenger: tuple[str, float] | None = None
 
     def update_audio(self, samples: np.ndarray, timestamp: float) -> SpeakerEstimate:
         if timestamp < self.latest_audio:
@@ -70,7 +74,7 @@ class RealtimeTracker:
         return self._record_estimate(max(timestamp, self.latest_vision))
 
     def update_faces(
-        self, observations: list[tuple[FaceBox, float | None]], timestamp: float
+        self, observations: list[FaceObservation], timestamp: float
     ) -> SpeakerEstimate:
         if timestamp < self.latest_vision:
             raise ValueError("frame timestamp is out of order")
@@ -79,31 +83,12 @@ class RealtimeTracker:
             for identity, box in self.boxes.items()
             if timestamp - box.timestamp <= IDENTITY_ABSENCE_SECONDS
         }
-        self.mouths = {
-            identity: values
-            for identity, values in self.mouths.items()
-            if identity in self.boxes
-        }
-        available = set(self.boxes)
+        observations = [FaceObservation(*item) for item in observations]
+        identities = self.identities.identify(observations, self.boxes)
         faces = []
-        for box, aperture in observations:
-            identity = max(
-                available,
-                key=lambda candidate: intersection_over_union(
-                    self.boxes[candidate], box
-                ),
-                default=None,
-            )
-            matched = (
-                identity is not None
-                and intersection_over_union(self.boxes[identity], box)
-                >= FACE_TRACK_IOU_THRESHOLD
-            )
-            if matched:
-                available.remove(identity)
-            else:
-                identity = f"face-{self.next_identity}"
-                self.next_identity += 1
+        self.unmeasured = set()
+        for identity, observation in zip(identities, observations):
+            box, aperture, _ = observation
             self.boxes[identity] = box
             history = self.mouths.setdefault(
                 identity, deque(maxlen=MAXIMUM_HISTORY_ITEMS)
@@ -113,11 +98,14 @@ class RealtimeTracker:
             while history and timestamp - history[0][0] > MOUTH_HISTORY_SECONDS:
                 history.popleft()
             motion = 0.0
-            if aperture is not None and len(history) >= MINIMUM_MOUTH_OBSERVATIONS:
+            if len(history) >= MINIMUM_MOUTH_OBSERVATIONS:
                 motion = max(value for _, value in history) - min(
                     value for _, value in history
                 )
+            elif aperture is None:
+                self.unmeasured.add(identity)
             faces.append(LiveFace(identity, box, motion))
+        self.mouths = {face.track_id: self.mouths[face.track_id] for face in faces}
         self.current_faces = faces
         self.latest_vision = timestamp
         return self._record_estimate(max(timestamp, self.latest_audio))
@@ -139,18 +127,30 @@ class RealtimeTracker:
         ]
         ranked = sorted(candidates, key=self._candidate_score, reverse=True)
         if not ranked or self._candidate_score(ranked[0]) < MOUTH_MOTION_THRESHOLD:
-            return SpeakerEstimate(
-                timestamp, OFF_SCREEN_SPEAKER, None, "off_screen", 0.0
-            )
+            return self._without_measured_motion(timestamp)
         selected = ranked[0]
         runner_up_motion = self._candidate_score(ranked[1]) if len(ranked) > 1 else 0.0
         margin = self._candidate_score(selected) - runner_up_motion
         if margin < MOUTH_ASSIGNMENT_MARGIN:
             return SpeakerEstimate(timestamp, UNCERTAIN_SPEAKER, None, "uncertain", 0.0)
-        identity = selected.track_id
-        label = f"Person {identity.rsplit('-', 1)[1]}"
         confidence = min(1.0, margin / MOUTH_MOTION_THRESHOLD)
+        return self._visible_estimate(timestamp, selected.track_id, confidence)
+
+    @staticmethod
+    def _visible_estimate(
+        timestamp: float, identity: str, confidence: float
+    ) -> SpeakerEstimate:
+        label = f"Person {identity.rsplit('-', 1)[1]}"
         return SpeakerEstimate(timestamp, label, identity, "visible", confidence)
+
+    def _without_measured_motion(self, timestamp: float) -> SpeakerEstimate:
+        if not self.unmeasured:
+            return SpeakerEstimate(
+                timestamp, OFF_SCREEN_SPEAKER, None, "off_screen", 0.0
+            )
+        if self.active_identity in self.unmeasured:
+            return self._visible_estimate(timestamp, self.active_identity, 0.0)
+        return SpeakerEstimate(timestamp, UNCERTAIN_SPEAKER, None, "uncertain", 0.0)
 
     def speaker_at(self, timestamp: float) -> SpeakerEstimate:
         candidates = [
@@ -194,9 +194,38 @@ class RealtimeTracker:
         relative_face_size = sqrt(face.box.width * face.box.height / maximum_face_area)
         return face.mouth_motion * relative_face_size + bonus
 
+    def _stabilized(self, raw: SpeakerEstimate) -> SpeakerEstimate:
+        held = self.held
+        timestamp = raw.timestamp
+        holding = (
+            held is not None
+            and timestamp - held.timestamp <= SPEAKER_HOLD_SECONDS
+            and timestamp - self.latest_vision <= GEOMETRY_EXPIRY_SECONDS
+            and any(face.track_id == held.face_track for face in self.current_faces)
+        )
+        if raw.state == "silent" or not holding:
+            self.challenger = None
+            self.held = raw if raw.state == "visible" else None
+            return raw
+        if raw.state != "visible":
+            return replace(held, timestamp=timestamp)
+        if raw.face_track == held.face_track:
+            self.challenger = None
+            self.held = raw
+            return raw
+        if self.challenger is None or self.challenger[0] != raw.face_track:
+            self.challenger = (raw.face_track, timestamp)
+        if timestamp - self.challenger[1] < SPEAKER_SWITCH_SECONDS:
+            return replace(held, timestamp=timestamp)
+        self.challenger = None
+        self.held = raw
+        return raw
+
     def _record_estimate(self, timestamp: float) -> SpeakerEstimate:
         self.revision += 1
-        estimate = replace(self.estimate(timestamp), revision=self.revision)
+        estimate = replace(
+            self._stabilized(self.estimate(timestamp)), revision=self.revision
+        )
         if self.speaker_history and self.speaker_history[-1].timestamp == timestamp:
             self.speaker_history.pop()
         self.speaker_history.append(estimate)
