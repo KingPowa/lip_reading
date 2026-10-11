@@ -133,6 +133,16 @@ class FaceIdentityGallery:
         examples.append(descriptor)
         self.features.move_to_end(identity)
 
+    def forget(self, identity: str) -> None:
+        self.features.pop(identity, None)
+
+    def merge(self, new: str, old: str) -> None:
+        examples = self.features.pop(new, None)
+        if examples:
+            self.features.setdefault(
+                old, deque(maxlen=MAXIMUM_IDENTITY_FEATURES)
+            ).extend(examples)
+
     def _limit_history(self, visible: set[str]) -> None:
         dormant = [identity for identity in self.features if identity not in visible]
         for identity in dormant:

@@ -14,6 +14,9 @@ def observation(timestamp, position, features, aperture=0.02):
 
 class LiveIdentityTest(unittest.TestCase):
     def setUp(self):
+        patcher = patch("src.core.tracking.realtime.MINIMUM_FACE_TRACK_FRAMES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tracker = RealtimeTracker()
         self.first_features = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         self.second_features = np.array([0.0, 1.0, 0.0], dtype=np.float32)
@@ -217,3 +220,68 @@ class LiveIdentityTest(unittest.TestCase):
         )
         self.assertEqual(len(set(second)), 2)
         self.assertNotIn(first[0], second[1:])
+
+
+class FaceConfirmationTest(unittest.TestCase):
+    def setUp(self):
+        self.tracker = RealtimeTracker()
+        self.speech = np.full(1600, 0.05, dtype=np.float32)
+        self.people = [np.eye(3, dtype=np.float32)[index] for index in range(3)]
+
+    def frame(self, step, *faces):
+        timestamp = round(0.1 * step, 1)
+        self.tracker.update_audio(self.speech, timestamp)
+        observations = [
+            observation(timestamp, position, features, aperture)
+            for position, features, aperture in faces
+        ]
+        return self.tracker.update_faces(observations, timestamp)
+
+    def test_new_face_is_tentative_until_seen_in_consecutive_frames(self):
+        self.frame(1, (20, self.people[0], 0.02))
+        self.frame(2, (20, self.people[0], 0.02))
+        self.assertEqual(self.tracker.current_faces, [])
+        self.frame(3, (20, self.people[0], 0.02))
+        self.assertEqual([face.track_id for face in self.tracker.current_faces], ["face-1"])
+
+    def test_ghost_detection_creates_no_person_and_does_not_shift_numbering(self):
+        quiet = (20, self.people[0], 0.02)
+        self.frame(1, quiet)
+        self.frame(2, quiet, (300, self.people[2], 0.05))
+        self.frame(3, quiet, (300, self.people[2], 0.05))
+        self.frame(4, quiet)
+        self.frame(5, quiet)
+        apertures = [0.02, 0.09, 0.03, 0.09]
+        for step, aperture in enumerate(apertures, start=6):
+            estimate = self.frame(step, quiet, (200, self.people[1], aperture))
+        self.assertEqual((estimate.state, estimate.speaker), ("visible", "Person 2"))
+
+    def test_ghost_features_are_not_kept_after_it_disappears(self):
+        quiet = (20, self.people[0], 0.02)
+        for step in range(1, 4):
+            self.frame(step, quiet)
+        self.frame(4, quiet, (300, self.people[2], 0.05))
+        self.frame(5, quiet)
+        self.frame(6, quiet)
+        self.assertEqual(list(self.tracker.identities.features), ["face-1"])
+
+    def test_confirmed_face_reentry_by_features_restores_original_label(self):
+        for step, aperture in enumerate([0.02, 0.09, 0.03], start=1):
+            self.frame(step, (20, self.people[0], aperture))
+        late = 10.0 + IDENTITY_ABSENCE_SECONDS
+        self.tracker.update_faces([observation(late, 300, self.people[0])], late)
+        self.assertEqual([face.track_id for face in self.tracker.current_faces], ["face-1"])
+
+    def test_tentative_face_tolerates_one_missed_frame_but_not_two(self):
+        face = (20, self.people[0], 0.02)
+        self.frame(1, face)
+        self.frame(2, face)
+        self.frame(3)
+        self.frame(4, face)
+        self.assertEqual([item.track_id for item in self.tracker.current_faces], ["face-1"])
+        other = RealtimeTracker()
+        for step, present in enumerate([True, True, False, False, True], start=1):
+            observations = [observation(0.1 * step, 20, self.people[0])] if present else []
+            other.update_faces(observations, 0.1 * step)
+        self.assertEqual(other.current_faces, [])
+        self.assertNotIn("face-1", other.identities.features)

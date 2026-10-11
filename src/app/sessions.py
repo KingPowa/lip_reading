@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from src.config.live import MAXIMUM_SESSIONS, SESSION_ID_PATTERN, SESSION_IDLE_SECONDS
 from src.core.audio.realtime import StreamingTranscriber
 from src.core.tracking.realtime import RealtimeTracker
+from src.core.tracking.voice import SpeechBuffer
 from src.core.vision.live import LiveFaceDetector
 
 
@@ -32,8 +33,12 @@ class LiveSession:
     last_result: dict | None = None
     touched_at: float = field(default_factory=time.monotonic)
     active_requests: int = 0
+    speech_buffer: SpeechBuffer = field(default_factory=SpeechBuffer)
+    voice_job_active: bool = False
+    closed: bool = False
 
     def close(self) -> None:
+        self.closed = True
         if self.detector is not None:
             self.detector.close()
             self.detector = None

@@ -135,3 +135,39 @@ class TranscriptionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VoiceEmbeddingTest(unittest.TestCase):
+    class Classifier:
+        def encode_batch(self, signal):
+            import torch
+
+            self.shape = tuple(signal.shape)
+            return torch.tensor([[[3.0, 4.0]]])
+
+    def test_embed_samples_returns_a_unit_vector(self):
+        from src.core.audio.speech import embed_samples
+
+        classifier = self.Classifier()
+        embedding = embed_samples(classifier, np.zeros(16_000, dtype=np.float32))
+        np.testing.assert_allclose(embedding, [0.6, 0.8], rtol=1e-6)
+        self.assertEqual(classifier.shape, (1, 16_000))
+
+    def test_embed_samples_rejects_segments_shorter_than_the_minimum(self):
+        from src.core.audio.speech import embed_samples
+
+        self.assertIsNone(
+            embed_samples(self.Classifier(), np.zeros(1_000, dtype=np.float32))
+        )
+
+    def test_offline_turn_embedding_uses_the_same_embedding(self):
+        from src.core.audio.speech import _turn_embedding
+        from src.core.contracts import SpeakerTurn
+
+        embedding = _turn_embedding(
+            self.Classifier(),
+            np.zeros(32_000, dtype=np.float32),
+            16_000,
+            SpeakerTurn("a", 0.0, 1.0, 0.9),
+        )
+        np.testing.assert_allclose(embedding, [0.6, 0.8], rtol=1e-6)

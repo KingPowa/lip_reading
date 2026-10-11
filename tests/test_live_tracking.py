@@ -6,7 +6,11 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from src.config.live import GEOMETRY_EXPIRY_SECONDS, IDENTITY_ABSENCE_SECONDS
+from src.config.live import (
+    GEOMETRY_EXPIRY_SECONDS,
+    IDENTITY_ABSENCE_SECONDS,
+    UNMEASURED_CARRYOVER_SECONDS,
+)
 from src.config.models import MODEL_DIRECTORY
 from src.core.contracts import FaceBox
 from src.core.tracking.realtime import RealtimeTracker
@@ -15,6 +19,9 @@ from src.core.vision.live import LiveFaceDetector, face_roll_degrees
 
 class RealtimeTrackingTest(unittest.TestCase):
     def setUp(self):
+        patcher = patch("src.core.tracking.realtime.MINIMUM_FACE_TRACK_FRAMES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tracker = RealtimeTracker()
         self.speech = np.full(1600, 0.05, dtype=np.float32)
 
@@ -165,6 +172,43 @@ class RealtimeTrackingTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 detector.detect(content.getvalue(), 0)
         decode.assert_not_called()
+
+
+class UnmeasuredCarryOverTest(unittest.TestCase):
+    def setUp(self):
+        self.tracker = RealtimeTracker()
+        self.speech = np.full(1600, 0.05, dtype=np.float32)
+
+    def step(self, index, aperture):
+        timestamp = round(0.1 * index, 1)
+        self.tracker.update_audio(self.speech, timestamp)
+        return self.tracker.update_faces(
+            [(FaceBox(timestamp, 20, 10, 40, 40), aperture)], timestamp
+        )
+
+    def run_steps(self, first, last, aperture):
+        return {index: self.step(index, aperture) for index in range(first, last + 1)}
+
+    def test_carry_over_holds_then_expires_and_never_becomes_off_screen(self):
+        for index, aperture in [(1, 0.02), (2, 0.09), (3, 0.03)]:
+            self.step(index, aperture)
+        estimates = self.run_steps(4, 25, None)
+        unmeasured_start = 6
+        cap_steps = round(UNMEASURED_CARRYOVER_SECONDS * 10)
+        for index in range(unmeasured_start, unmeasured_start + 10 + 1):
+            self.assertEqual(estimates[index].state, "visible", index)
+        for index in range(unmeasured_start + cap_steps + 1, 26):
+            self.assertEqual(estimates[index].state, "uncertain", index)
+
+    def test_measured_frames_reset_the_carry_over_clock(self):
+        for index, aperture in [(1, 0.02), (2, 0.09), (3, 0.03)]:
+            self.step(index, aperture)
+        self.run_steps(4, 16, None)
+        for index, aperture in [(17, 0.02), (18, 0.09), (19, 0.03)]:
+            self.step(index, aperture)
+        estimates = self.run_steps(20, 32, None)
+        for index in range(22, 32):
+            self.assertEqual(estimates[index].state, "visible", index)
 
 
 class LiveFaceFeaturesTest(unittest.TestCase):

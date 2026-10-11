@@ -16,6 +16,15 @@ from src.core.contracts import FaceBox, Word
 
 class LiveServiceTest(unittest.TestCase):
     def setUp(self):
+        patcher = patch("src.core.tracking.realtime.MINIMUM_FACE_TRACK_FRAMES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        voice = patch(
+            "src.app.service.warm_up_speaker_model",
+            side_effect=RuntimeError("voice model disabled in tests"),
+        )
+        voice.start()
+        self.addCleanup(voice.stop)
         self.service = RecognitionService("it", Path("models"))
         self.service.models = Mock()
         self.service.start_session("camera", "it")
@@ -223,6 +232,27 @@ class LiveServiceTest(unittest.TestCase):
         self.assertEqual(returned["trackId"], first["trackId"])
         self.assertNotIn("features", returned)
 
+    def test_voice_model_failure_warns_and_leaves_voice_disabled(self):
+        with (
+            patch("src.app.service.StreamingTranscriber"),
+            patch("src.app.service.LiveFaceDetector"),
+            self.assertLogs("src.app.service", level="WARNING") as logs,
+        ):
+            self.service.warm_up()
+        self.assertIn("voice identity unavailable", logs.output[0])
+        self.assertIsNone(self.service.voice_executor)
+
+    def test_voice_model_success_enables_embedding_worker(self):
+        classifier = object()
+        with (
+            patch("src.app.service.StreamingTranscriber"),
+            patch("src.app.service.LiveFaceDetector"),
+            patch("src.app.service.warm_up_speaker_model", return_value=classifier),
+        ):
+            self.service.warm_up()
+        self.assertIs(self.service.speaker_classifier, classifier)
+        self.assertIsNotNone(self.service.voice_executor)
+
     def test_camera_warmup_failure_does_not_stop_microphone_startup(self):
         with (
             patch("src.app.service.StreamingTranscriber"),
@@ -243,3 +273,67 @@ class LiveServiceTest(unittest.TestCase):
         self.assertNotIn("MediaRecorder", page)
         self.assertEqual(build_parser().parse_args([]).chunk_seconds, 0.1)
         self.assertNotIn("</script><evil>", build_page(100, "</script><evil>"))
+
+
+class VoiceJobsTest(unittest.TestCase):
+    def setUp(self):
+        self.service = RecognitionService("it", Path("models"))
+        self.service.models = Mock()
+        self.addCleanup(self.service.close)
+        self.pcm = np.full(1600, 1600, dtype="<i2").tobytes()
+        self.started, self.release = threading.Event(), threading.Event()
+        self.calls = 0
+
+    def embedding(self, classifier, samples):
+        self.calls += 1
+        self.started.set()
+        if not self.release.wait(3):
+            raise RuntimeError("test embedding timeout")
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+    def speak(self, first, count):
+        for step in range(first, first + count):
+            self.service.update_activity(self.pcm, "camera", round(0.1 * (step + 1), 1))
+
+    def session(self):
+        with self.service.registry.use("camera") as session:
+            return session
+
+    def test_voice_disabled_service_ignores_speech_without_jobs(self):
+        self.speak(0, 30)
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(self.session().tracker.voices.centroids, {})
+
+    def test_embedding_never_blocks_activity_and_runs_one_job_at_a_time(self):
+        self.service.enable_voice(object())
+        with patch("src.app.service.embed_samples", side_effect=self.embedding):
+            self.speak(0, 10)
+            self.assertTrue(self.started.wait(3))
+            self.speak(10, 40)
+            self.assertEqual(self.calls, 1)
+            self.release.set()
+            self.service.voice_executor.shutdown(wait=True)
+        centroids = self.session().tracker.voices.centroids
+        self.assertEqual(list(centroids), ["voice-1"])
+        self.assertFalse(self.session().voice_job_active)
+
+    def test_late_result_after_session_close_is_ignored(self):
+        self.service.enable_voice(object())
+        with patch("src.app.service.embed_samples", side_effect=self.embedding):
+            self.speak(0, 10)
+            self.assertTrue(self.started.wait(3))
+            session = self.session()
+            self.service.close_session("camera")
+            self.release.set()
+            self.service.voice_executor.shutdown(wait=True)
+        self.assertEqual(session.tracker.voices.centroids, {})
+
+    def test_failed_embedding_disables_voice_and_activity_keeps_working(self):
+        self.service.enable_voice(object())
+        executor = self.service.voice_executor
+        with patch("src.app.service.embed_samples", side_effect=RuntimeError("boom")):
+            self.speak(0, 10)
+            executor.shutdown(wait=True)
+        self.assertIsNone(self.service.voice_executor)
+        result = self.service.update_activity(self.pcm, "camera", 5.0)
+        self.assertIn("speaker", result)

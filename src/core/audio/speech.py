@@ -275,9 +275,9 @@ def _audio_samples(audio_path: Path) -> tuple[np.ndarray, int]:
     return samples / np.iinfo(np.int16).max, sample_rate
 
 
-def warm_up_speaker_model(model_directory: Path) -> None:
+def warm_up_speaker_model(model_directory: Path) -> object:
     """Load the cached voice embedding model before accepting live speech."""
-    _speaker_classifier(model_directory / SPEAKER_MODEL_DIRECTORY)
+    return _speaker_classifier(model_directory / SPEAKER_MODEL_DIRECTORY)
 
 
 @lru_cache
@@ -296,19 +296,24 @@ def _speaker_classifier(model_directory: Path):
     )
 
 
-def _turn_embedding(
-    classifier: object, samples: np.ndarray, sample_rate: int, turn: SpeakerTurn
-) -> np.ndarray | None:
+def embed_samples(classifier: object, samples: np.ndarray) -> np.ndarray | None:
+    """Return a unit voice embedding, or None when the speech is too short."""
     import torch
 
-    start = max(0, int(turn.start * sample_rate))
-    end = min(len(samples), int(turn.end * sample_rate))
-    if end - start < int(MINIMUM_VOICE_SEGMENT_SECONDS * sample_rate):
+    if len(samples) < int(MINIMUM_VOICE_SEGMENT_SECONDS * NORMALIZED_AUDIO_SAMPLE_RATE):
         return None
-    signal = torch.from_numpy(samples[start:end]).unsqueeze(0)
+    signal = torch.from_numpy(samples).unsqueeze(0)
     with torch.inference_mode():
         embedding = classifier.encode_batch(signal).squeeze().cpu().numpy()
     return embedding / np.linalg.norm(embedding)
+
+
+def _turn_embedding(
+    classifier: object, samples: np.ndarray, sample_rate: int, turn: SpeakerTurn
+) -> np.ndarray | None:
+    start = max(0, int(turn.start * sample_rate))
+    end = min(len(samples), int(turn.end * sample_rate))
+    return embed_samples(classifier, samples[start:end])
 
 
 def _cluster_embedding(embedding: np.ndarray, centroids: list[np.ndarray]) -> str:
