@@ -19,6 +19,7 @@ from src.config.vision import (
     FACE_CROP_SIZE,
     FACE_PADDING_RATIO,
     FRAME_DURATION,
+    MAXIMUM_ACTIVITY_BOX_DISTANCE_SECONDS,
     MAXIMUM_FRAMES_PER_BATCH,
     MFCC_FEATURE_COUNT,
     MFCCS_PER_FRAME,
@@ -311,7 +312,17 @@ def _score_track(
             track.track_id, float(timestamp), float(timestamp + FRAME_DURATION), score
         )
         for timestamp, score in zip(timestamps, scores, strict=True)
+        if _has_nearby_detection(track, float(timestamp))
     ]
+
+
+def _has_nearby_detection(track: FaceTrack, timestamp: float) -> bool:
+    index = bisect_left(track.boxes, timestamp, key=lambda box: box.timestamp)
+    neighbors = track.boxes[max(0, index - 1) : index + 1]
+    return any(
+        abs(box.timestamp - timestamp) <= MAXIMUM_ACTIVITY_BOX_DISTANCE_SECONDS
+        for box in neighbors
+    )
 
 
 def _frame_at(frames: list[VideoFrame], timestamp: float) -> VideoFrame:

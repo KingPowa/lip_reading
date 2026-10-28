@@ -7,12 +7,24 @@ import torch
 
 from src.core.contracts import FaceActivity, FaceBox, FaceTrack
 from src.core.media import VideoFrame
-from src.core.vision.light_asd import _score_track, score_face_activity
+from src.core.vision.light_asd import (
+    _has_nearby_detection,
+    _score_track,
+    score_face_activity,
+)
 
 FACE_TRACK_COUNT = 9
 
 
 class LightAsdTest(unittest.TestCase):
+    def test_long_gaps_between_face_detections_are_not_visual_evidence(self):
+        track = FaceTrack(
+            "face", 0.0, 5.0, [FaceBox(0.0, 0, 0, 10, 10), FaceBox(5.0, 0, 0, 10, 10)]
+        )
+        self.assertTrue(_has_nearby_detection(track, 0.2))
+        self.assertFalse(_has_nearby_detection(track, 2.5))
+        self.assertTrue(_has_nearby_detection(track, 4.9))
+
     def test_live_activity_window_scores_only_new_speech_on_original_timestamps(self):
         tracks = [
             FaceTrack("old", 0.0, 1.0, [FaceBox(0, 0, 0, 10, 10)]),

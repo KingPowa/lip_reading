@@ -145,7 +145,7 @@ video
                association rules → captions, JSON, annotated video
 ```
 
-For each voice turn, a face is picked only when its time-weighted Light-ASD score is at least 0.20 and leads the runner-up by at least 0.12. Weak evidence is labelled `uncertain`; no visible face is `off_screen`. This is safer than boxing the wrong person. A face track cannot carry two person labels: if overlapping input would do that, the lower-confidence event becomes `uncertain`. Only attributed speakers are highlighted, using an upper-body rectangle estimated from the face.
+Offline association first aggregates timestamp-weighted Light-ASD evidence across each voice cluster. A cluster needs at least 8 seconds of speech and a clear average lead to ground a stable person label. Scores farther than 0.3 seconds from an actual face detection are discarded, so long interpolated gaps cannot supply false speaking evidence. Once a voice is grounded, its rectangle follows that face while the track remains visible, even when a brief Light-ASD dip or a moving listener produces a noisy local score. Face positions interpolate only between detections separated by at most 2 seconds; longer gaps and times outside the actual tracked interval retain the person label without a highlight. Ungrounded turns use a local visual lead of at least 0.12; unknown weak evidence is labelled `uncertain`, and no visible face is `off_screen`. This is safer than boxing the wrong person. A face track cannot carry two person labels: if overlapping input would do that, the lower-confidence event becomes `uncertain`. Only attributed speakers are highlighted, using an upper-body rectangle estimated from the face.
 
 ### Improving a result
 

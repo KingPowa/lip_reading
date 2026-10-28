@@ -10,8 +10,10 @@ from src.config.tracking import (
     DEFAULT_SPEECH_TEXT,
     MAXIMUM_WORD_GAP_SECONDS,
     OFF_SCREEN_SPEAKER,
+    OFFLINE_VOICE_MINIMUM_SECONDS,
     UNCERTAIN_SPEAKER,
 )
+from src.config.vision import MAXIMUM_FACE_TRACK_INTERPOLATION_GAP_SECONDS
 from src.core.contracts import CaptionEvent, FaceActivity, FaceTrack, SpeakerTurn, Word
 
 
@@ -24,6 +26,7 @@ def associate_speakers(
     track_labels: dict[str, str] | None = None,
     prefer_track_labels: bool = False,
     merge_words: bool = False,
+    use_recording_voice_evidence: bool = False,
 ) -> list[CaptionEvent]:
     """Attribute transcribed turns to visually active tracked faces.
 
@@ -38,13 +41,38 @@ def associate_speakers(
     """
     voice_labels = voice_labels if voice_labels is not None else {}
     track_labels = track_labels if track_labels is not None else {}
-    track_ids = {track.track_id for track in tracks}
+    tracks_by_identity = {track.track_id: track for track in tracks}
+    track_ids = set(tracks_by_identity)
     events: list[CaptionEvent] = []
+    voice_tracks = (
+        _voice_tracks(turns, activities, track_ids)
+        if use_recording_voice_evidence
+        else {}
+    )
+    for track_id in dict.fromkeys(voice_tracks.values()):
+        _track_label(track_id, track_labels)
+    for voice_id, track_id in voice_tracks.items():
+        voice_labels.setdefault(voice_id, track_labels[track_id])
     for turn in turns:
+        grounded_track = voice_tracks.get(turn.speaker_id)
+        if grounded_track is not None:
+            events.extend(
+                _grounded_events(
+                    turn,
+                    words,
+                    tracks_by_identity[grounded_track],
+                    voice_labels[turn.speaker_id],
+                )
+            )
+            continue
         scores = _activity_scores(turn, activities, track_ids)
         selected_track, score = _select_track(scores)
         if selected_track is None:
-            events.append(_unassigned_event(turn, words, bool(scores)))
+            events.append(
+                _unassigned_event(
+                    turn, words, bool(scores), voice_labels.get(turn.speaker_id)
+                )
+            )
             continue
         label = (
             _track_label(selected_track, track_labels)
@@ -69,6 +97,52 @@ def associate_speakers(
         )
     events = _disambiguate_overlaps(events)
     return merge_word_events(events) if prefer_track_labels or merge_words else events
+
+
+def _grounded_events(
+    turn: SpeakerTurn, words: list[Word], track: FaceTrack, speaker: str
+) -> list[CaptionEvent]:
+    intervals: list[tuple[float, float]] = []
+    for box in track.boxes:
+        if (
+            intervals
+            and box.timestamp - intervals[-1][1]
+            <= MAXIMUM_FACE_TRACK_INTERPOLATION_GAP_SECONDS
+        ):
+            intervals[-1] = (intervals[-1][0], box.timestamp)
+            continue
+        intervals.append((box.timestamp, box.timestamp))
+    events = []
+    cursor = turn.start
+    for interval_start, interval_end in intervals:
+        start = max(turn.start, track.start, interval_start)
+        end = min(turn.end, track.end, interval_end)
+        if end <= start:
+            continue
+        if start > cursor:
+            events.append(
+                _unassigned_event(
+                    replace(turn, start=cursor, end=start), words, False, speaker
+                )
+            )
+        visible_turn = replace(turn, start=start, end=end)
+        events.append(
+            CaptionEvent(
+                start,
+                end,
+                speaker,
+                track.track_id,
+                _turn_text(visible_turn, words),
+                turn.confidence,
+                "visible",
+            )
+        )
+        cursor = end
+    if cursor < turn.end:
+        events.append(
+            _unassigned_event(replace(turn, start=cursor), words, False, speaker)
+        )
+    return events
 
 
 def merge_word_events(events: list[CaptionEvent]) -> list[CaptionEvent]:
@@ -117,6 +191,31 @@ def _activity_scores(
     return {track_id: score / duration for track_id, score in weighted_scores.items()}
 
 
+def _voice_tracks(
+    turns: list[SpeakerTurn], activities: list[FaceActivity], track_ids: set[str]
+) -> dict[str, str]:
+    evidence: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    durations: dict[str, float] = defaultdict(float)
+    for turn in turns:
+        duration = turn.end - turn.start
+        if duration <= 0:
+            continue
+        durations[turn.speaker_id] += duration
+        for track_id, score in _activity_scores(turn, activities, track_ids).items():
+            evidence[turn.speaker_id][track_id] += score * duration
+    grounded = {}
+    for voice_id, scores in evidence.items():
+        duration = durations[voice_id]
+        if duration < OFFLINE_VOICE_MINIMUM_SECONDS:
+            continue
+        track_id, _ = _select_track(
+            {track_id: score / duration for track_id, score in scores.items()}
+        )
+        if track_id is not None:
+            grounded[voice_id] = track_id
+    return grounded
+
+
 def _select_track(scores: dict[str, float]) -> tuple[str | None, float]:
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     if not ranked:
@@ -161,12 +260,15 @@ def _track_label(track_id: str, track_labels: dict[str, str]) -> str:
 
 
 def _unassigned_event(
-    turn: SpeakerTurn, words: list[Word], has_candidates: bool
+    turn: SpeakerTurn,
+    words: list[Word],
+    has_candidates: bool,
+    known_speaker: str | None = None,
 ) -> CaptionEvent:
     return CaptionEvent(
         turn.start,
         turn.end,
-        UNCERTAIN_SPEAKER if has_candidates else OFF_SCREEN_SPEAKER,
+        known_speaker or (UNCERTAIN_SPEAKER if has_candidates else OFF_SCREEN_SPEAKER),
         None,
         _turn_text(turn, words),
         turn.confidence,

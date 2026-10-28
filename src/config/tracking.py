@@ -7,6 +7,7 @@ MAXIMUM_WORD_GAP_SECONDS = 0.4
 
 ACTIVE_SPEAKER_THRESHOLD = 0.20
 ASSIGNMENT_MARGIN = 0.12
+OFFLINE_VOICE_MINIMUM_SECONDS = 8.0
 
 FACE_IDENTITY_SIMILARITY_THRESHOLD = 0.45
 FACE_IDENTITY_ASSIGNMENT_MARGIN = 0.08
@@ -37,5 +38,7 @@ MAXIMUM_VOICE_TIMELINE = 64
 # Voice-majority turns: a voice backed by this much face evidence names the whole utterance,
 # because listeners' mouth jitter wins single frames but not a session of votes.
 VOICE_TURN_MIN_SECONDS = 8.0
-VOICE_TURN_LEAD = 2.0  # top face vs runner-up; crowds spread jitter votes over many listeners
+VOICE_TURN_LEAD = (
+    2.0  # top face vs runner-up; crowds spread jitter votes over many listeners
+)
 VOICE_TURN_SINGLE_VOICE_SHARE = 0.7  # below this the utterance's voices point to different faces; keep the split logic

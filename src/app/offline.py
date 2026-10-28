@@ -256,6 +256,7 @@ def recognize(
         track_labels,
         prefer_track_labels=live and speaker_centroids is None,
         merge_words=live,
+        use_recording_voice_evidence=not live,
     )
     return info, tracks, events, turns, words
 
