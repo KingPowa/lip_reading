@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from src.core.audio.models import extract_model
+from src.core.audio.models import extract_model, widen_search
 from src.core.audio.realtime import StreamingTranscriber, decode_pcm
 
 
@@ -25,8 +25,8 @@ class StreamingAudioTest(unittest.TestCase):
         decoder.PartialResult.return_value = '{"partial":"ciao"}'
         with patch("vosk.KaldiRecognizer", return_value=decoder):
             transcriber = StreamingTranscriber(object(), 1.0)
-        update = transcriber.accept(b"pcm", False)
-        decoder.AcceptWaveform.assert_called_once_with(b"pcm")
+        update = transcriber.accept(b"pcm!", False)
+        decoder.AcceptWaveform.assert_called_once_with(b"pcm!")
         self.assertEqual(update.partial_text, "ciao")
         self.assertEqual(update.words, [])
         decoder.SetWords.assert_called_once_with(True)
@@ -53,3 +53,17 @@ class StreamingAudioTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 extract_model(archive, directory, "model")
             self.assertFalse((directory.parent / "outside.txt").exists())
+
+
+class DecoderSearchTest(unittest.TestCase):
+    def test_search_options_are_replaced_once_and_others_kept(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "model.conf"
+            config.write_text("--min-active=200\n--beam=10.0\n--max-active=3000\n")
+            widen_search(config)
+            widen_search(config)
+            lines = config.read_text().splitlines()
+        self.assertEqual(lines[0], "--min-active=200")
+        self.assertEqual([line for line in lines if line.startswith("--beam=")], ["--beam=13.0"])
+        self.assertIn("--max-active=7000", lines)
+        self.assertIn("--lattice-beam=4.0", lines)

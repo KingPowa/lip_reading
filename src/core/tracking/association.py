@@ -79,7 +79,8 @@ def merge_word_events(events: list[CaptionEvent]) -> list[CaptionEvent]:
             previous.speaker,
             previous.face_track,
             previous.state,
-        ) == (event.speaker, event.face_track, event.state)
+            previous.language,
+        ) == (event.speaker, event.face_track, event.state, event.language)
         adjacent = (
             previous is not None
             and 0 <= event.start - previous.end <= MAXIMUM_WORD_GAP_SECONDS

@@ -2,66 +2,204 @@
 <html lang="en">
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Live speaker captions</title>
+  <meta name="color-scheme" content="dark light" />
+  <title>Speaker Captions</title>
   <style>
     :root {
-      color-scheme: dark;
-      font-family: system-ui, sans-serif;
+      color-scheme: dark light;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+        Arial, sans-serif;
+      --bg: #0b1020;
+      --surface: #131a2e;
+      --surface-2: #1b2440;
+      --surface-3: #243055;
+      --border: rgba(148, 163, 184, 0.18);
+      --text: #f1f5f9;
+      --muted: #9aa8c2;
+      --accent: #6366f1;
+      --accent-hover: #818cf8;
+      --accent-text: #ffffff;
+      --danger: #ef4444;
+      --danger-hover: #f87171;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --stage: #02040a;
+      --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+      --radius: 1.1rem;
+      --gap: 1rem;
+      --focus: #fbbf24;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #eef1f8;
+        --surface: #ffffff;
+        --surface-2: #f1f4fb;
+        --surface-3: #e2e8f5;
+        --border: rgba(15, 23, 42, 0.12);
+        --text: #0f172a;
+        --muted: #475569;
+        --accent: #4f46e5;
+        --accent-hover: #4338ca;
+        --danger: #dc2626;
+        --danger-hover: #b91c1c;
+        --ok: #059669;
+        --warn: #b45309;
+        --shadow: 0 14px 38px rgba(30, 41, 80, 0.16);
+        --focus: #1d4ed8;
+      }
+    }
+    * {
+      box-sizing: border-box;
+    }
+    [hidden] {
+      display: none !important;
+    }
+    html,
+    body {
+      height: 100%;
     }
     body {
-      background: #111827;
-      color: #f9fafb;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      font-family: var(--font);
+      line-height: 1.4;
       margin: 0;
-    }
-    main {
-      display: grid;
-      gap: 1rem;
-      grid-template-columns: minmax(0, 1fr) minmax(18rem, 26rem);
-      margin: auto;
-      max-width: 90rem;
-      padding: 1rem;
-    }
-    header,
-    #controls {
-      grid-column: 1 / -1;
-    }
-    h1 {
-      font-size: 1.3rem;
-      margin: 0;
-    }
-    p {
-      color: #cbd5e1;
-      margin: 0.4rem 0;
     }
     button,
     select {
+      color: inherit;
       font: inherit;
-      padding: 0.55rem 0.75rem;
     }
     button {
       cursor: pointer;
     }
-    #controls {
+    button:disabled {
+      cursor: not-allowed;
+    }
+    :focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    /* Top bar */
+    .topbar {
       align-items: center;
       display: flex;
-      flex-wrap: wrap;
-      gap: 0.6rem;
+      gap: 1rem;
+      justify-content: space-between;
+      padding: 0.9rem 1.25rem 0.4rem;
     }
-    #status {
-      color: #93c5fd;
-      min-height: 1.5rem;
+    .brand {
+      align-items: center;
+      display: flex;
+      gap: 0.65rem;
     }
-    #stage {
+    .logo {
+      background: linear-gradient(135deg, var(--accent), #ec4899);
+      border-radius: 0.6rem;
+      color: #fff;
+      display: grid;
+      font-size: 1rem;
+      height: 2rem;
+      place-items: center;
+      width: 2rem;
+    }
+    h1 {
+      font-size: 1.15rem;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+      margin: 0;
+    }
+    .pill {
+      align-items: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      display: inline-flex;
+      font-size: 0.92rem;
+      font-weight: 550;
+      gap: 0.55rem;
+      max-width: 60vw;
+      padding: 0.4rem 0.9rem;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .pill-dot {
+      background: var(--muted);
+      border-radius: 50%;
+      flex: none;
+      height: 0.65rem;
+      transition: background 0.2s;
+      width: 0.65rem;
+    }
+    .pill[data-tone="ready"] .pill-dot {
+      background: var(--muted);
+    }
+    .pill[data-tone="loading"] .pill-dot {
+      animation: pulse 1.2s ease-in-out infinite;
+      background: var(--warn);
+    }
+    .pill[data-tone="listening"] .pill-dot {
+      animation: pulse 2s ease-in-out infinite;
+      background: var(--ok);
+    }
+    .pill[data-tone="uncertain"] .pill-dot {
+      background: var(--warn);
+    }
+    .pill-dot {
+      color: var(--muted);
+    }
+    .pill[data-tone="speaking"] .pill-dot {
+      box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 25%, transparent);
+    }
+    #speaker-state {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Layout */
+    main {
+      display: grid;
+      flex: 1;
+      gap: var(--gap);
+      grid-template-columns: minmax(0, 1fr) 22.5rem;
+      margin: 0 auto;
+      max-width: 100rem;
+      min-height: 0;
+      padding: 0.6rem 1.25rem 1.25rem;
+      width: 100%;
+    }
+    .stage-column {
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
+      min-height: 0;
       min-width: 0;
     }
+
+    /* Video stage */
     .video-shell {
-      background: #030712;
+      aspect-ratio: 16 / 9;
+      background: var(--stage);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      isolation: isolate;
+      max-height: calc(100vh - 14rem);
+      overflow: hidden;
       position: relative;
+      width: 100%;
+    }
+    @supports (max-height: 100dvh) {
+      .video-shell {
+        max-height: calc(100dvh - 14rem);
+      }
     }
     video {
       display: block;
-      max-height: 72vh;
-      max-width: 100%;
+      height: 100%;
+      object-fit: cover;
       width: 100%;
     }
     #faces {
@@ -72,120 +210,504 @@
       width: 100%;
     }
     .speaker {
-      cursor: help;
       pointer-events: auto;
     }
-    .speaker:focus {
-      outline: 3px solid #facc15;
+    .speaker rect.outline {
+      fill: none;
+      filter: drop-shadow(0 0 5px currentColor);
+      stroke-width: 4px;
+      transition: opacity 0.2s;
+    }
+    .speaker.quiet rect.outline {
+      filter: none;
+      opacity: 0.4;
+      stroke-width: 2px;
+    }
+    .speaker text {
+      fill: #0b1020;
+      font-family: var(--font);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .speaker:focus-visible {
+      outline: 3px solid var(--focus);
+    }
+    .placeholder {
+      align-content: center;
+      color: #8190ad;
+      display: grid;
+      gap: 0.4rem;
+      inset: 0;
+      justify-items: center;
+      position: absolute;
+      text-align: center;
+    }
+    .placeholder .big {
+      font-size: 2.6rem;
+      opacity: 0.7;
+    }
+    .offcamera {
+      backdrop-filter: blur(10px);
+      background: rgba(2, 6, 18, 0.62);
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 0.35rem 0.8rem;
+      position: absolute;
+      right: 0.9rem;
+      top: 0.9rem;
+      z-index: 2;
     }
     #caption {
-      background: #030712;
-      font-size: 1.05rem;
-      min-height: 2rem;
-      padding: 0.65rem;
+      backdrop-filter: blur(14px);
+      background: rgba(2, 6, 18, 0.66);
+      border-radius: 0.8rem;
+      bottom: 0.9rem;
+      color: #f8fafc;
+      font-size: clamp(1rem, 1.1rem + 0.5vw, 1.7rem);
+      left: 0.9rem;
+      line-height: 1.3;
+      padding: 0.6rem 0.9rem;
+      position: absolute;
+      right: 0.9rem;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      z-index: 2;
     }
-    aside {
-      background: #1f2937;
-      border-radius: 0.5rem;
-      min-height: 12rem;
-      overflow: hidden;
+    #caption-speaker {
+      font-weight: 700;
+      margin-right: 0.5rem;
     }
-    aside.collapsed {
-      display: none;
+    #caption-provisional {
+      color: #cbd5e1;
+      font-style: italic;
+      opacity: 0.85;
     }
-    #transcript-toggle {
-      float: right;
-      margin: 0.5rem;
+    #caption.idle {
+      color: #aab6cc;
+      font-size: 1rem;
     }
-    #transcript {
-      clear: both;
-      max-height: 70vh;
-      overflow: auto;
-      padding: 0.5rem;
+    .loading {
+      align-content: center;
+      backdrop-filter: blur(8px);
+      background: rgba(2, 6, 18, 0.72);
+      color: #e2e8f0;
+      display: grid;
+      gap: 0.9rem;
+      inset: 0;
+      justify-items: center;
+      position: absolute;
+      z-index: 3;
     }
-    .event {
-      background: none;
+    .spinner {
+      animation: spin 0.9s linear infinite;
+      border: 4px solid rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      border-top-color: #fff;
+      height: 2.6rem;
+      width: 2.6rem;
+    }
+
+    /* Control dock */
+    .dock {
+      align-items: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.8rem 1.1rem;
+      padding: 0.8rem 1rem;
+    }
+    .primary {
+      background: var(--accent);
       border: 0;
-      border-radius: 0.3rem;
-      color: inherit;
-      display: block;
-      padding: 0.6rem;
-      text-align: left;
+      border-radius: 999px;
+      color: var(--accent-text);
+      font-size: 1.05rem;
+      font-weight: 650;
+      min-width: 8.5rem;
+      padding: 0.8rem 1.6rem;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .primary:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+    .primary:active:not(:disabled) {
+      transform: scale(0.97);
+    }
+    .primary[data-state="running"] {
+      background: var(--danger);
+    }
+    .primary[data-state="running"]:hover:not(:disabled) {
+      background: var(--danger-hover);
+    }
+    .primary:disabled {
+      opacity: 0.55;
+    }
+    .secondary {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.55rem 1rem;
+    }
+    .secondary:hover {
+      background: var(--surface-3);
+    }
+    .field {
+      align-items: center;
+      color: var(--muted);
+      display: flex;
+      font-size: 0.85rem;
+      gap: 0.5rem;
+    }
+    select#camera-select {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      max-width: 14rem;
+      min-width: 8rem;
+      padding: 0.5rem 0.6rem;
+    }
+    select:disabled {
+      opacity: 0.55;
+    }
+    .chips {
+      display: flex;
+      gap: 0.35rem;
+    }
+    .chip {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 650;
+      letter-spacing: 0.03em;
+      padding: 0.35rem 0.7rem;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .chip[aria-pressed="true"] {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+    .chip:disabled {
+      opacity: 0.55;
+    }
+    #language-hint {
+      color: var(--warn);
+      font-size: 0.82rem;
       width: 100%;
     }
-    .event.active {
-      background: #155e75;
+    #language-hint:empty {
+      display: none;
     }
-    .event time {
-      color: #93c5fd;
-      display: block;
+    #status {
+      color: var(--muted);
+      flex: 1 1 100%;
+      font-size: 0.85rem;
+      margin: 0;
+      min-height: 1.2rem;
+    }
+
+    /* Transcript */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .panel h2 {
+      border-bottom: 1px solid var(--border);
+      font-size: 0.95rem;
+      font-weight: 650;
+      margin: 0;
+      padding: 0.85rem 1rem;
+    }
+    #transcript {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      gap: 0.6rem;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0.8rem;
+      scroll-behavior: smooth;
+    }
+    #empty {
+      color: var(--muted);
+      display: grid;
+      flex: 1;
+      gap: 0.3rem;
+      justify-items: center;
+      padding: 2rem 1rem;
+      place-content: center;
+      position: absolute;
+      inset: 3rem 0 0;
+      text-align: center;
+    }
+    #empty .big {
+      font-size: 2rem;
+      opacity: 0.7;
+    }
+    .event {
+      animation: rise 0.25s ease-out;
+      background: var(--surface-2);
+      border-left: 4px solid var(--muted);
+      border-radius: 0.8rem;
+      display: flex;
+      gap: 0.7rem;
+      padding: 0.65rem 0.8rem;
+    }
+    .event.provisional {
+      border-left-style: dashed;
+      opacity: 0.8;
+    }
+    .event.provisional .text {
+      font-style: italic;
+    }
+    .avatar {
+      background: var(--muted);
+      border-radius: 50%;
+      color: #0b1020;
+      display: grid;
+      flex: none;
+      font-size: 0.72rem;
+      font-weight: 750;
+      height: 2rem;
+      place-items: center;
+      width: 2rem;
+    }
+    .body {
+      min-width: 0;
+    }
+    .meta {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
       font-size: 0.8rem;
+      gap: 0.2rem 0.5rem;
     }
-    @media (max-width: 52rem) {
+    .meta .name {
+      color: var(--text);
+      font-weight: 700;
+    }
+    .meta time {
+      color: var(--muted);
+    }
+    .badge {
+      background: var(--surface-3);
+      border-radius: 0.4rem;
+      color: var(--muted);
+      font-size: 0.7rem;
+      font-weight: 650;
+      padding: 0.05rem 0.4rem;
+    }
+    .text {
+      margin-top: 0.15rem;
+      overflow-wrap: anywhere;
+    }
+    #jump {
+      background: var(--accent);
+      border: 0;
+      border-radius: 999px;
+      bottom: 0.9rem;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      color: var(--accent-text);
+      font-size: 0.85rem;
+      font-weight: 600;
+      left: 50%;
+      padding: 0.45rem 1rem;
+      position: absolute;
+      transform: translateX(-50%);
+    }
+
+    /* Toast */
+    #toast {
+      align-items: flex-start;
+      animation: rise 0.25s ease-out;
+      background: var(--surface);
+      border: 1px solid var(--danger);
+      border-radius: 0.8rem;
+      bottom: 1.2rem;
+      box-shadow: var(--shadow);
+      display: flex;
+      gap: 0.7rem;
+      max-width: min(26rem, calc(100vw - 2rem));
+      padding: 0.75rem 0.9rem;
+      position: fixed;
+      right: 1.2rem;
+      z-index: 10;
+    }
+    #toast-text {
+      flex: 1;
+      font-size: 0.9rem;
+    }
+    #toast-close {
+      background: none;
+      border: 0;
+      border-radius: 0.4rem;
+      font-size: 1.1rem;
+      line-height: 1;
+      padding: 0.1rem 0.4rem;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+    @keyframes pulse {
+      50% {
+        opacity: 0.35;
+      }
+    }
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        scroll-behavior: auto !important;
+        transition: none !important;
+      }
+      .spinner {
+        border-top-color: rgba(255, 255, 255, 0.2);
+        border-right-color: #fff;
+      }
+    }
+    @media (max-width: 900px) {
+      body {
+        height: auto;
+      }
       main {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
+        padding: 0.6rem 0.8rem 1rem;
       }
-      aside {
-        grid-row: 4;
+      .video-shell {
+        max-height: none;
       }
+      .panel {
+        height: 24rem;
+      }
+      .topbar {
+        padding: 0.8rem 0.8rem 0.3rem;
+      }
+    }
+    /* Desktop app: clear the macOS window buttons and drag the window by the top bar. */
+    :root[data-shell="mac"] .topbar {
+      -webkit-app-region: drag;
+      padding-left: 5.5rem;
+      user-select: none;
+    }
+    :root[data-shell="mac"] .topbar .pill {
+      -webkit-app-region: no-drag;
     }
   </style>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">&#127908;</span>
+      <h1>Speaker Captions</h1>
+    </div>
+    <div id="pill" class="pill" data-tone="ready">
+      <span id="pill-dot" class="pill-dot" aria-hidden="true"></span>
+      <span
+        id="speaker-state"
+        role="status"
+        aria-live="polite"
+        aria-label="Current speaker status"
+        >Ready</span
+      >
+    </div>
+  </header>
   <main>
-    <header>
-      <h1>Live speaker captions</h1>
-      <p>
-        Microphone captions and camera detection run independently. A face
-        outline shows the estimated speaker; speech outside the camera is
-        labelled separately.
-      </p>
-    </header>
-    <section id="controls" aria-label="Camera controls">
-      <label
-        >Camera
-        <select id="camera-select"></select
-      ></label>
-      <label
-        >Language
-        <select id="language">
-          <option value="en">English</option>
-          <option value="it">Italiano</option>
-          <option value="es">Español</option>
-          <option value="fr">Français</option>
-          <option value="de">Deutsch</option>
-        </select></label
-      >
-      <button id="start">Start camera</button
-      ><button id="stop" disabled>Stop</button
-      ><button id="retry" hidden>Retry recognition</button
-      ><button
-        id="transcript-toggle"
-        aria-controls="transcript-panel"
-        aria-expanded="true"
-      >
-        Collapse transcript
-      </button>
-      <span id="status" role="status"
-        >Choose Start camera to grant camera and microphone access.</span
-      >
-    </section>
-    <section id="stage">
-      <h2>Live camera</h2>
+    <section class="stage-column" aria-label="Live camera">
       <div class="video-shell">
-        <video id="camera" autoplay muted playsinline></video
-        ><svg
+        <video id="camera" autoplay muted playsinline></video>
+        <svg
           id="faces"
-          preserveAspectRatio="none"
+          preserveAspectRatio="xMidYMid slice"
           aria-label="Current speaker highlights"
         ></svg>
+        <div id="placeholder" class="placeholder">
+          <div class="big" aria-hidden="true">&#128249;</div>
+          <div>Camera preview appears here</div>
+        </div>
+        <div id="offcamera" class="offcamera" hidden></div>
+        <div id="caption" aria-live="polite" aria-label="Live caption" hidden>
+          <span id="caption-speaker"></span
+          ><span id="caption-final"></span
+          ><span id="caption-provisional"></span>
+        </div>
+        <div id="loading" class="loading" role="alert" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <div>Preparing speech models…</div>
+        </div>
       </div>
-      <div id="speaker-state" role="status">No speech detected.</div>
-      <div id="caption" aria-live="polite">Waiting for microphone audio.</div>
+      <section class="dock" aria-label="Capture controls">
+        <button
+          id="toggle"
+          class="primary"
+          data-state="idle"
+          aria-label="Start captioning"
+        >
+          Start
+        </button>
+        <label class="field"
+          >Camera
+          <select id="camera-select" aria-label="Camera"></select
+        ></label>
+        <div class="field" role="group" aria-label="Spoken languages">
+          Languages
+          <div id="language-chips" class="chips"></div>
+          <select id="language" multiple hidden aria-hidden="true" tabindex="-1">
+            <option value="en">English</option>
+            <option value="it">Italiano</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+          </select>
+        </div>
+        <button
+          id="retry"
+          class="secondary"
+          aria-label="Retry recognition of retained speech"
+          hidden
+        >
+          Retry recognition
+        </button>
+        <div id="language-hint" role="status" aria-live="polite"></div>
+        <p id="status" role="status" aria-live="polite">
+          Press Start to grant camera and microphone access.
+        </p>
+      </section>
     </section>
-    <aside id="transcript-panel">
+    <aside class="panel" id="transcript-panel" aria-label="Transcript">
       <h2>Transcript</h2>
+      <div id="empty">
+        <div class="big" aria-hidden="true">&#128172;</div>
+        <div>Press Start and begin speaking</div>
+      </div>
       <div id="transcript" aria-label="All recognized speech"></div>
+      <button id="jump" aria-label="Jump to latest transcript entry" hidden>
+        Jump to latest &#8595;
+      </button>
     </aside>
   </main>
+  <div id="toast" role="alert" hidden>
+    <span id="toast-text"></span>
+    <button id="toast-close" aria-label="Dismiss message">&#10005;</button>
+  </div>
   <script>
     const configuration = __CONFIGURATION__;
   </script>

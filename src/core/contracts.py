@@ -56,6 +56,7 @@ class Word:
     start: float
     end: float
     confidence: float
+    language: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class CaptionEvent:
     text: str
     confidence: float
     state: str
+    language: str | None = None
 
     def as_json(self) -> dict[str, Any]:
         """Return the public JSON representation of this caption event.
@@ -88,4 +90,6 @@ class CaptionEvent:
         """
         data = asdict(self)
         data["faceTrack"] = data.pop("face_track")
+        if data["language"] is None:
+            del data["language"]
         return data

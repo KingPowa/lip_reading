@@ -42,6 +42,7 @@ function element() {
 const settings = {
   transcriptionIntervalMilliseconds: 350,
   language: "it",
+  maximumSessionLanguages: 3,
   sampleRate: 16000,
   contextSeconds: 0,
   maximumWindowSeconds: 1,
@@ -128,6 +129,7 @@ async function check() {
   );
   assert.equal(requests.length, 1, "ASR uploads must be serialized");
   assert.equal(requests[0].path, "/audio");
+  assert.equal(requests[0].headers["X-Whisper-Language"], "it");
   releaseFirst();
   await new Promise((resolve) => setImmediate(resolve));
   vm.runInContext("drainAudio();", context);
@@ -156,7 +158,11 @@ async function check() {
     outline,
     "caption expiry must not expire a speaking outline",
   );
-  assert.match(outline.getAttribute("points"), /^25,/);
+  const [outlineRect, nameChip, nameLabel] = outline.children;
+  assert.equal(outlineRect.getAttribute("x"), "25");
+  assert.equal(nameLabel.textContent, "Person 1", "face carries a name chip");
+  assert.equal(nameChip.getAttribute("fill"), "#fff");
+  assert.equal(elements.get("#speaker-state").textContent, "Person 1 speaking");
   vm.runInContext(
     "renderer.updateSpeaker({timestamp:0.9,revision:1,state:'silent'}); renderer.render();",
     context,
@@ -173,6 +179,130 @@ async function check() {
     0,
     "freshness uses capture age, not response arrival",
   );
+
+  vm.runInContext(
+    "renderer.updateSpeaker({timestamp:2.0,revision:9,state:'off_screen',faceTrack:null,speaker:'Person 2',color:'#abc'}); renderer.render();",
+    context,
+  );
+  assert.equal(
+    elements.get("#speaker-state").textContent,
+    "Person 2 · off camera",
+  );
+  assert.equal(elements.get("#pill-dot").style.background, "#abc");
+  assert.equal(elements.get("#offcamera").hidden, false, "named chip shows");
+  assert.match(elements.get("#offcamera").textContent, /Person 2 · off camera/);
+  assert.equal(elements.get("#offcamera").style.color, "#abc");
+  assert.equal(elements.get("#faces").children.length, 0, "no box off camera");
+  vm.runInContext(
+    "renderer.updateSpeaker({timestamp:2.0,revision:10,state:'off_screen',faceTrack:null,speaker:'Off-screen speaker',color:'#888'}); renderer.render();",
+    context,
+  );
+  assert.equal(
+    elements.get("#speaker-state").textContent,
+    "Someone off camera",
+  );
+  assert.match(elements.get("#offcamera").textContent, /Voice off camera/);
+  assert.equal(elements.get("#offcamera").style.color, "", "unknown voice is neutral");
+  vm.runInContext(
+    "renderer.updateSpeaker({timestamp:2.0,revision:11,state:'uncertain',faceTrack:null,speaker:'Unknown',color:'#888'}); renderer.render();",
+    context,
+  );
+  assert.equal(
+    elements.get("#speaker-state").textContent,
+    "Not sure who is speaking",
+  );
+  assert.equal(elements.get("#offcamera").hidden, true);
+
+  const tags = () =>
+    elements.get("#transcript").children.map((entry) => {
+      const [name, ...rest] = entry.children[1].children[0].children;
+      return [name.textContent, ...rest.map((item) => item.textContent)].join("|");
+    });
+  const badges = (entry) =>
+    entry.children[1].children[0].children.filter((item) =>
+      (item.className || "").startsWith("badge"),
+    );
+  const event = { start: 1, end: 2, speaker: "Person 1", text: "ciao", color: "#fff" };
+  const reply = { captureEnd: 2, timings: { transcription: 0.1 }, provisionalText: "hi" };
+  vm.runInContext("renderer.reset()", context);
+  context.reply = { ...reply, language: "en", events: [{ ...event, language: "it" }] };
+  vm.runInContext("renderer.updateCaptions(reply)", context);
+  assert.ok(
+    elements
+      .get("#transcript")
+      .children.every((entry) => badges(entry).length === 0),
+    "single-language sessions show no language badge",
+  );
+  context.reply = { ...reply, language: "en", events: [{ ...event, language: "it", start: 10, end: 11 }] };
+  vm.runInContext("renderer.multilingual = true; renderer.updateCaptions(reply)", context);
+  const cards = elements.get("#transcript").children;
+  assert.equal(cards.length, 3, "provisional card is replaced, not duplicated");
+  assert.equal(tags()[1], "Person 1|0:10|IT");
+  assert.equal(cards[1].children[0].textContent, "P1", "avatar initials");
+  assert.equal(cards[1].style.borderLeftColor, "#fff");
+  assert.equal(tags().at(-1), "Live speech|provisional|EN");
+  assert.equal(elements.get("#empty").hidden, true, "empty state disappears");
+  vm.runInContext("renderer.render()", context);
+  assert.equal(elements.get("#caption").hidden, false);
+  assert.equal(
+    elements.get("#caption-speaker").textContent,
+    "Person 1",
+    "caption bar names the speaker",
+  );
+  assert.equal(elements.get("#caption-provisional").textContent, " hi");
+
+  const textOf = (card) => card.children[1].children[1].textContent;
+  const send = (events) => {
+    context.merge = { ...reply, provisionalText: "", events };
+    vm.runInContext("renderer.updateCaptions(merge)", context);
+  };
+  vm.runInContext("renderer.reset()", context);
+  send([{ ...event, start: 1, end: 2 }]);
+  send([{ ...event, start: 3, end: 4, text: "mondo" }]);
+  assert.equal(elements.get("#transcript").children.length, 1, "same speaker merges");
+  assert.equal(textOf(elements.get("#transcript").children[0]), "ciao mondo");
+  send([{ ...event, start: 4, end: 5, speaker: "Person 2", text: "x" }]);
+  send([{ ...event, start: 5, end: 6, speaker: "Person 2", text: "y" }]);
+  send([{ ...event, start: 10, end: 11, speaker: "Person 2", text: "z" }]);
+  assert.equal(elements.get("#transcript").children.length, 3, "new speaker and long gap start cards");
+  send([{ ...event, start: 13, end: 41, speaker: "Person 2", text: "w" }]);
+  assert.equal(elements.get("#transcript").children.length, 4, "paragraphs stop at 30 seconds");
+  vm.runInContext("renderer.reset()", context);
+  send([{ ...event, language: "it" }]);
+  context.reply = { ...reply, language: "en", events: [{ ...event, language: "it", start: 10, end: 11 }] };
+  vm.runInContext("renderer.updateCaptions(reply)", context);
+
+  context.offReply = {
+    ...reply,
+    language: "en",
+    events: [{ ...event, language: "it", speaker: "Person 2", state: "off_screen" }],
+  };
+  vm.runInContext("renderer.updateCaptions(offReply)", context);
+  const offCameraCard = elements.get("#transcript").children.at(-2);
+  assert.ok(
+    badges(offCameraCard).some((item) => item.textContent === "off camera"),
+    "named off-screen events carry an off camera badge",
+  );
+
+  const transcript = elements.get("#transcript");
+  const jump = elements.get("#jump");
+  assert.equal(jump.hidden, true, "jump button hidden while following");
+  transcript.scrollHeight = 1000;
+  transcript.clientHeight = 300;
+  transcript.scrollTop = 0;
+  transcript.onscroll();
+  vm.runInContext("renderer.updateCaptions(reply)", context);
+  assert.equal(jump.hidden, false, "scrolled-up readers get a jump button");
+  assert.equal(transcript.scrollTop, 0, "scrolled-up readers are not moved");
+  jump.onclick();
+  assert.equal(transcript.scrollTop, 1000);
+  assert.equal(jump.hidden, true);
+
+  vm.runInContext("renderer.showError(\"boom\")", context);
+  assert.equal(elements.get("#toast").hidden, false);
+  assert.equal(elements.get("#toast-text").textContent, "boom");
+  elements.get("#toast-close").onclick();
+  assert.equal(elements.get("#toast").hidden, true, "toast is dismissible");
 
   let attempts = 0;
   context.fetch = async (path, options) => {
@@ -272,6 +402,70 @@ async function check() {
       "Stop flushes the last partial PCM packet",
     );
   }
+  const picker = vm.createContext({
+    configuration: { ...settings, language: undefined },
+    document: {
+      querySelector(selector) {
+        const item = element();
+        if (selector === "#language")
+          item.options = ["en", "it", "es", "fr"].map((value) => ({ value }));
+        return item;
+      },
+      createElement: element,
+      createElementNS: element,
+    },
+    navigator: { language: "it-IT" },
+    performance: { now: () => 0 },
+    requestAnimationFrame() {},
+    setTimeout() {},
+    AbortSignal,
+    window: {},
+  });
+  load(picker, "audio-buffer");
+  load(picker, "renderer");
+  load(picker, "client");
+  assert.equal(vm.runInContext("selectedLanguages().join()", picker), "it");
+  assert.equal(vm.runInContext("chips.length", picker), 4, "one chip per language");
+  assert.equal(
+    vm.runInContext("chips.map((chip) => chip.getAttribute('aria-pressed')).join()", picker),
+    "false,true,false,false",
+    "the locale language chip is pressed",
+  );
+  vm.runInContext("chips[0].onclick(); chips[2].onclick();", picker);
+  assert.equal(vm.runInContext("selectedLanguages().join()", picker), "en,it,es");
+  vm.runInContext("chips[3].onclick();", picker);
+  assert.equal(
+    vm.runInContext("selectedLanguages().join()", picker),
+    "en,it,es",
+    "chips cap at three languages",
+  );
+  assert.match(vm.runInContext("languageHint.textContent", picker), /between 1 and 3/);
+  assert.equal(vm.runInContext("chips[3].getAttribute('aria-pressed')", picker), "false");
+  vm.runInContext("chips[0].onclick(); chips[2].onclick(); chips[1].onclick();", picker);
+  assert.equal(vm.runInContext("selectedLanguages().join()", picker), "it", "last chip cannot be deselected");
+  vm.runInContext("setPhase('running')", picker);
+  assert.equal(vm.runInContext("chips.every((chip) => chip.disabled)", picker), true);
+  vm.runInContext("chips[0].onclick();", picker);
+  assert.equal(vm.runInContext("selectedLanguages().join()", picker), "it", "chips are locked during capture");
+  assert.equal(vm.runInContext("toggleButton.textContent", picker), "Stop");
+  vm.runInContext("setPhase('idle')", picker);
+  assert.equal(vm.runInContext("toggleButton.disabled", picker), false);
+  vm.runInContext("selectLanguages(['it'])", picker);
+  vm.runInContext("selectLanguages(['it', 'en', 'es'])", picker);
+  vm.runInContext("languageSelect.options[3].selected = true; languageSelect.onchange()", picker);
+  assert.equal(
+    vm.runInContext("selectedLanguages().join()", picker),
+    "it",
+    "a fourth language is reverted to the previous choice",
+  );
+  vm.runInContext("languageSelect.options[0].selected = true; languageSelect.onchange()", picker);
+  assert.equal(vm.runInContext("selectedLanguages().join()", picker), "en,it");
+  vm.runInContext("selectLanguages([]); languageSelect.onchange()", picker);
+  assert.equal(
+    vm.runInContext("selectedLanguages().join()", picker),
+    "en,it",
+    "at least one language stays selected",
+  );
   console.log(
     "live client: independent outlines, PCM retention, retry, freshness, stop flush, and resampling passed",
   );

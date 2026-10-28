@@ -24,6 +24,7 @@ from src.config.audio import (
     VOICE_CLUSTER_THRESHOLD,
 )
 from src.config.models import SPEAKER_MODEL_DIRECTORY, SPEAKER_MODEL_SOURCE
+from src.core.audio.voice_onnx import ONNX_FILENAME, OnnxSpeakerEmbedder
 from src.core.contracts import SpeakerTurn, Word
 
 LOGGER = logging.getLogger(__name__)
@@ -243,7 +244,10 @@ def write_speech_json(path: Path, turns: list[SpeakerTurn], words: list[Word]) -
     """
     payload = {
         "turns": [turn.__dict__ for turn in turns],
-        "words": [word.__dict__ for word in words],
+        "words": [
+            {key: value for key, value in word.__dict__.items() if value is not None}
+            for word in words
+        ],
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -276,7 +280,13 @@ def _audio_samples(audio_path: Path) -> tuple[np.ndarray, int]:
 
 
 def warm_up_speaker_model(model_directory: Path) -> object:
-    """Load the cached voice embedding model before accepting live speech."""
+    """Load the live voice embedder: torch-free ONNX if exported, else SpeechBrain."""
+    path = model_directory / SPEAKER_MODEL_DIRECTORY / ONNX_FILENAME
+    if path.exists():
+        return OnnxSpeakerEmbedder(path)
+    LOGGER.warning(
+        "%s missing (run scripts/export_ecapa_onnx.py); live voice uses SpeechBrain", path
+    )
     return _speaker_classifier(model_directory / SPEAKER_MODEL_DIRECTORY)
 
 
@@ -298,13 +308,16 @@ def _speaker_classifier(model_directory: Path):
 
 def embed_samples(classifier: object, samples: np.ndarray) -> np.ndarray | None:
     """Return a unit voice embedding, or None when the speech is too short."""
-    import torch
-
     if len(samples) < int(MINIMUM_VOICE_SEGMENT_SECONDS * NORMALIZED_AUDIO_SAMPLE_RATE):
         return None
-    signal = torch.from_numpy(samples).unsqueeze(0)
-    with torch.inference_mode():
-        embedding = classifier.encode_batch(signal).squeeze().cpu().numpy()
+    if isinstance(classifier, OnnxSpeakerEmbedder):
+        embedding = classifier(samples)
+    else:
+        import torch
+
+        signal = torch.from_numpy(samples).unsqueeze(0)
+        with torch.inference_mode():
+            embedding = classifier.encode_batch(signal).squeeze().cpu().numpy()
     return embedding / np.linalg.norm(embedding)
 
 

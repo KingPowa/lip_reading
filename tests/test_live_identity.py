@@ -93,16 +93,19 @@ class LiveIdentityTest(unittest.TestCase):
 
     def test_off_screen_speech_and_fresh_mouth_history_on_return(self):
         speech = np.full(1600, 0.05, dtype=np.float32)
-        for timestamp, aperture in [(0.1, 0.02), (0.2, 0.09), (0.3, 0.03)]:
+        for step in range(1, 13):
+            timestamp = step / 10
             self.tracker.update_audio(speech, timestamp)
             self.update(
-                timestamp, observation(timestamp, 20, self.first_features, aperture)
+                timestamp,
+                observation(timestamp, 20, self.first_features, 0.09 * (step % 2) + 0.02),
             )
-        self.assertEqual(self.tracker.estimate(0.3).speaker, "Person 1")
-        self.tracker.update_audio(speech, 0.4)
-        self.update(0.4)
-        self.assertEqual(self.tracker.estimate(0.4).state, "off_screen")
-        for offset, aperture in [(0.0, 0.03), (0.1, 0.09), (0.2, 0.02)]:
+        self.assertEqual(self.tracker.estimate(timestamp).speaker, "Person 1")
+        self.tracker.update_audio(speech, 1.3)
+        self.update(1.3)
+        self.assertEqual(self.tracker.estimate(1.3).state, "off_screen")
+        for step in range(12):
+            offset, aperture = step / 10, 0.03 + 0.06 * (step % 2)
             timestamp = self.return_time + offset
             self.tracker.update_audio(speech, timestamp)
             self.update(
@@ -186,18 +189,20 @@ class LiveIdentityTest(unittest.TestCase):
 
     def test_brief_absence_does_not_restore_old_speaking_evidence(self):
         speech = np.full(1600, 0.05, dtype=np.float32)
-        for timestamp, aperture in [(0.1, 0.02), (0.2, 0.09), (0.3, 0.03)]:
+        for step in range(1, 13):
+            timestamp = step / 10
             self.tracker.update_audio(speech, timestamp)
             self.update(
-                timestamp, observation(timestamp, 20, self.first_features, aperture)
+                timestamp,
+                observation(timestamp, 20, self.first_features, 0.09 * (step % 2) + 0.02),
             )
-        self.assertEqual(self.tracker.estimate(0.3).speaker, "Person 1")
-        self.update(0.4)
-        self.tracker.update_audio(speech, 0.5)
-        self.update(0.5, observation(0.5, 200, self.first_features, 0.03))
+        self.assertEqual(self.tracker.estimate(timestamp).speaker, "Person 1")
+        self.update(1.3)
+        self.tracker.update_audio(speech, 1.4)
+        self.update(1.4, observation(1.4, 200, self.first_features, 0.03))
         self.assertEqual(self.tracker.current_faces[0].track_id, "face-1")
         self.assertEqual(self.tracker.current_faces[0].mouth_motion, 0.0)
-        self.assertEqual(self.tracker.estimate(0.5).state, "off_screen")
+        self.assertEqual(self.tracker.estimate(1.4).state, "off_screen")
 
     def test_weak_but_consistent_embedding_keeps_identity_at_same_position(self):
         weak = np.array([0.35, 0.94, 0.0], dtype=np.float32)
@@ -251,7 +256,7 @@ class FaceConfirmationTest(unittest.TestCase):
         self.frame(3, quiet, (300, self.people[2], 0.05))
         self.frame(4, quiet)
         self.frame(5, quiet)
-        apertures = [0.02, 0.09, 0.03, 0.09]
+        apertures = [0.02, 0.09] * 6
         for step, aperture in enumerate(apertures, start=6):
             estimate = self.frame(step, quiet, (200, self.people[1], aperture))
         self.assertEqual((estimate.state, estimate.speaker), ("visible", "Person 2"))

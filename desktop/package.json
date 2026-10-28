@@ -1,0 +1,36 @@
+{
+  "name": "speaker-captions",
+  "productName": "Speaker Captions",
+  "version": "0.1.0",
+  "description": "Desktop shell for the live speaker captioning server",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "predist": "node scripts/write-backend.js",
+    "dist": "electron-builder --mac --dir --arm64"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.local.speakercaptions",
+    "productName": "Speaker Captions",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "preload.js", "permissions.js", "loading.html", "assets/**/*", "package.json"],
+    "extraResources": [{ "from": "backend.json", "to": "backend.json" }],
+    "mac": {
+      "target": [{ "target": "dir", "arch": ["arm64"] }],
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.png",
+      "hardenedRuntime": false,
+      "identity": null,
+      "extendInfo": {
+        "NSCameraUsageDescription": "Speaker Captions uses the camera to caption and identify who is speaking, entirely on this Mac.",
+        "NSMicrophoneUsageDescription": "Speaker Captions uses the microphone to caption and identify who is speaking, entirely on this Mac."
+      }
+    }
+  }
+}

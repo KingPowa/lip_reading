@@ -12,6 +12,7 @@ from src.config.streaming import (
     MAXIMUM_MODEL_EXTRACTED_BYTES,
     MODEL_DOWNLOAD_BLOCK_BYTES,
     MODEL_DOWNLOAD_TIMEOUT_SECONDS,
+    SPEECH_DECODER_OPTIONS,
     SPEECH_MODEL_URL,
     SPEECH_MODELS,
 )
@@ -41,6 +42,8 @@ class SpeechModelStore:
                 )
             if not model_path.is_dir():
                 download_model(self.directory, SPEECH_MODELS[language])
+            if self.custom_model is None:
+                widen_search(model_path / "conf" / "model.conf")
             SetLogLevel(-1)
             try:
                 model = Model(str(model_path))
@@ -50,6 +53,17 @@ class SpeechModelStore:
                 ) from error
             self.models[language] = model
             return model
+
+
+def widen_search(config: Path) -> None:
+    """Set the decoder search options in a catalog model's config (idempotent)."""
+    lines = [
+        line
+        for line in config.read_text().splitlines()
+        if line.split("=", 1)[0] not in SPEECH_DECODER_OPTIONS
+    ]
+    lines += [f"{name}={value}" for name, value in SPEECH_DECODER_OPTIONS.items()]
+    config.write_text("\n".join(lines) + "\n")
 
 
 def download_model(directory: Path, name: str) -> None:

@@ -13,6 +13,7 @@ def build_page(interval_milliseconds: int, language: str | None = None) -> str:
     configuration = {
         "transcriptionIntervalMilliseconds": interval_milliseconds,
         "language": language,
+        "maximumSessionLanguages": live.MAXIMUM_SESSION_LANGUAGES,
         "sampleRate": live.AUDIO_SAMPLE_RATE,
         "packetSeconds": live.AUDIO_PACKET_SECONDS,
         "maximumWindowSeconds": live.MAXIMUM_TRANSCRIPTION_SECONDS,

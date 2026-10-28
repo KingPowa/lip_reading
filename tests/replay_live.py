@@ -32,7 +32,6 @@ from src.config.models import MODEL_DIRECTORY
 WORD_SPACING_SECONDS = 0.3
 SECONDS_PER_MINUTE = 60.0
 WORD_STEPS = round(WORD_SPACING_SECONDS / AUDIO_PACKET_SECONDS)
-ORIGINAL_PERSON_LOOKBACK_SECONDS = 10.0
 
 
 def read_audio(path: str, offset: float, duration: float) -> np.ndarray:
@@ -44,10 +43,18 @@ def read_audio(path: str, offset: float, duration: float) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def prepare_frame(image: np.ndarray, degrees: float) -> bytes:
+def prepare_frame(image: np.ndarray, degrees: float, shrink: float = 1.0) -> bytes:
     height, width = image.shape[:2]
     scale = min(MAXIMUM_FRAME_WIDTH / width, MAXIMUM_FRAME_HEIGHT / height)
     image = cv2.resize(image, (round(width * scale), round(height * scale)))
+    if shrink < 1.0:
+        # Smaller faces make mouth motion subtler and landmarks noisier.
+        height, width = image.shape[:2]
+        small = cv2.resize(image, (round(width * shrink), round(height * shrink)))
+        canvas = np.zeros_like(image)
+        top, left = (height - small.shape[0]) // 2, (width - small.shape[1]) // 2
+        canvas[top : top + small.shape[0], left : left + small.shape[1]] = small
+        image = canvas
     if degrees:
         height, width = image.shape[:2]
         matrix = cv2.getRotationMatrix2D((width / 2, height / 2), degrees, 1.0)
@@ -58,7 +65,9 @@ def prepare_frame(image: np.ndarray, degrees: float) -> bytes:
     return cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tobytes()
 
 
-def frames(path: str, offset: float, steps: int, degrees: float, blanks=()):
+def frames(
+    path: str, offset: float, steps: int, degrees: float, blanks=(), shrink=1.0
+):
     video = cv2.VideoCapture(path)
     video.set(cv2.CAP_PROP_POS_MSEC, offset * 1000)
     interval = TRACKING_INTERVAL_MILLISECONDS / 1000
@@ -73,17 +82,26 @@ def frames(path: str, offset: float, steps: int, degrees: float, blanks=()):
                 image = decoded if success else image
             hidden = any(start <= target < end for start, end in blanks)
             if hidden and image is not None:
-                yield step, prepare_frame(np.zeros_like(image), degrees)
+                yield step, prepare_frame(np.zeros_like(image), degrees, shrink)
                 continue
-            yield step, None if image is None else prepare_frame(image, degrees)
+            yield step, None if image is None else prepare_frame(image, degrees, shrink)
     finally:
         video.release()
 
 
 def replay(
-    path: str, offset: float, duration: float, degrees: float, blanks=(), voice=True
+    path: str,
+    offset: float,
+    duration: float,
+    degrees: float,
+    blanks=(),
+    voice=True,
+    gain=1.0,
+    shrink=1.0,
+    reference=None,
+    dump=None,
 ) -> dict:
-    audio = read_audio(path, offset, duration)
+    audio = read_audio(path, offset, duration) * gain
     packet = round(AUDIO_PACKET_SECONDS * AUDIO_SAMPLE_RATE)
     steps = len(audio) // packet
     detector = LiveFaceDetector()
@@ -94,12 +112,12 @@ def replay(
     records, words, events = [], [], []
     detected = missing_mesh = no_face = total = suppressed = 0
     try:
-        for step, content in frames(path, offset, steps, degrees, blanks):
+        for step, content in frames(path, offset, steps, degrees, blanks, shrink):
             timestamp = round((step + 1) * AUDIO_PACKET_SECONDS, 6)
             chunk = audio[step * packet : (step + 1) * packet]
             tracker.update_audio(chunk, timestamp)
             if classifier is not None:
-                buffer.add(chunk, timestamp)
+                buffer.add(chunk, timestamp, tracker.speaking)
                 if buffer.ready():
                     samples, start, end = buffer.take()
                     began = time.perf_counter()
@@ -115,6 +133,30 @@ def replay(
             estimate = tracker.update_faces(observations, timestamp)
             suppressed += len(observations) - len(tracker.current_faces)
             records.append((timestamp, estimate, tracker.label_count))
+            if dump is not None:
+                dump.append(
+                    {
+                        "t": timestamp,
+                        "speaker": estimate.speaker,
+                        "state": estimate.state,
+                        "confidence": round(estimate.confidence, 3),
+                        "energy": round(float(np.sqrt(np.mean(chunk * chunk))), 5),
+                        "faces": [
+                            {
+                                "id": tracker.labels.get(face.track_id),
+                                "motion": round(face.mouth_motion, 4),
+                                "area": face.box.width * face.box.height,
+                                "box": [face.box.x, face.box.y, face.box.width],
+                                "aperture": (
+                                    tracker.mouths[face.track_id][-1][1]
+                                    if tracker.mouths.get(face.track_id)
+                                    else None
+                                ),
+                            }
+                            for face in tracker.current_faces
+                        ],
+                    }
+                )
             if estimate.state != "silent" and step % WORD_STEPS == 0:
                 words.append(Word("w", timestamp - 0.2, timestamp, 1.0))
                 events.extend(tracker.caption_events(words[-1:]))
@@ -122,7 +164,59 @@ def replay(
         detector.close()
     result = metrics(records, events, total, detected, missing_mesh, no_face, suppressed)
     relative = [(start - offset, end - offset) for start, end in blanks]
+    result |= attribution_metrics(records, relative)
+    if reference is not None:
+        result |= detection_metrics(records, reference_speech(reference, offset))
     return result | voice_metrics(tracker, records, embed_ms, relative)
+
+
+def reference_speech(path: str, offset: float) -> list[tuple[float, float]]:
+    """Speech intervals from an offline speech.json, shifted to the replay clock."""
+    words = json.loads(open(path, encoding="utf-8").read())["words"]
+    return [(word["start"] - offset, word["end"] - offset) for word in words]
+
+
+def detection_metrics(records, intervals) -> dict:
+    def speaking(time_):
+        return any(start - 0.15 <= time_ <= end + 0.15 for start, end in intervals)
+
+    inside = [item.state != "silent" for time_, item, _ in records if speaking(time_)]
+    outside = [
+        item.state != "silent" for time_, item, _ in records if not speaking(time_)
+    ]
+    return {
+        "speech_recall": round(sum(inside) / max(len(inside), 1), 3),
+        "speech_false_alarm": round(sum(outside) / max(len(outside), 1), 3),
+    }
+
+
+def attribution_metrics(records, blanks) -> dict:
+    """Single-speaker clips: how often speech goes to the dominant visible person."""
+    speech = [
+        item
+        for time_, item, _ in records
+        if item.state != "silent"
+        and not any(start <= time_ < end for start, end in blanks)
+    ]
+    visible = Counter(item.speaker for item in speech if item.state == "visible")
+    dominant = visible.most_common(1)[0][0] if visible else None
+    counts = Counter(
+        "dominant_visible"
+        if item.state == "visible" and item.speaker == dominant
+        else "other_person"
+        if item.speaker.startswith("Person") and item.speaker != dominant
+        else "dominant_off_screen"
+        if item.speaker == dominant
+        else item.state
+        for item in speech
+    )
+    total = max(len(speech), 1)
+    return {
+        "dominant_person": dominant,
+        "attribution": {
+            key: round(value / total, 3) for key, value in sorted(counts.items())
+        },
+    }
 
 
 def voice_metrics(tracker, records, embed_ms, blanks) -> dict:
@@ -142,15 +236,13 @@ def voice_metrics(tracker, records, embed_ms, blanks) -> dict:
 
 
 def blank_fractions(records, blanks) -> dict:
+    visible = Counter(item.speaker for _, item, _ in records if item.state == "visible")
+    dominant = visible.most_common(1)[0][0] if visible else None
     counts, total = Counter(), 0
     for start, end in blanks:
-        lookback = [
-            item.speaker
-            for time_, item, _ in records
-            if start - ORIGINAL_PERSON_LOOKBACK_SECONDS <= time_ < start
-            and item.state == "visible"
-        ]
-        original = Counter(lookback).most_common(1)[0][0] if lookback else None
+        # Single-speaker clips: the person most often attributed overall, not a
+        # short lookback that a listener can dominate.
+        original = dominant
         for time_, item, _ in records:
             if not start <= time_ < end or item.state == "silent":
                 continue
@@ -199,6 +291,10 @@ def main() -> None:
     parser.add_argument("--rotate", type=float, default=0.0)
     parser.add_argument("--blank", nargs=2, type=float, action="append", default=[])
     parser.add_argument("--no-voice", action="store_true")
+    parser.add_argument("--gain", type=float, default=1.0)
+    parser.add_argument("--shrink", type=float, default=1.0)
+    parser.add_argument("--reference", help="offline speech.json for speech recall")
+    parser.add_argument("--dump", help="write per-step speaker decisions to this JSON")
     arguments = parser.parse_args()
     cv2.setNumThreads(0)
     result = replay(
@@ -208,7 +304,14 @@ def main() -> None:
         arguments.rotate,
         [tuple(item) for item in arguments.blank],
         not arguments.no_voice,
+        arguments.gain,
+        arguments.shrink,
+        arguments.reference,
+        steps := [] if arguments.dump else None,
     )
+    if arguments.dump:
+        with open(arguments.dump, "w", encoding="utf-8") as handle:
+            json.dump(steps, handle)
     print(json.dumps(result, indent=2))
 
 

@@ -2,17 +2,20 @@
 
 import argparse
 import logging
-import re
+import os
 import ssl
 from pathlib import Path
 
-from src.app.server import LiveServer
+# Must precede the numpy import: idle OpenBLAS worker threads busy-wait after every
+# matmul, which measured ~5x the CPU of language ID and voice embeddings.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+from src.app.server import LiveServer  # noqa: E402
 from src.app.service import RecognitionService
 from src.config.live import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_TRANSCRIPTION_INTERVAL_SECONDS,
-    LANGUAGE_PATTERN,
     MAXIMUM_TRANSCRIPTION_INTERVAL_SECONDS,
     MINIMUM_TRANSCRIPTION_INTERVAL_SECONDS,
 )
@@ -38,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--language",
-        help="Speech model language (en, it, es, fr, de)",
+        help="Comma-separated speech languages, up to 3 (en, it, es, fr, de)",
     )
     parser.add_argument("--model-directory", type=Path, default=MODEL_DIRECTORY)
     parser.add_argument(
@@ -57,8 +60,6 @@ def serve(arguments: argparse.Namespace) -> None:
         raise ValueError("--chunk-seconds must be between 0.05 and 1.0")
     if bool(arguments.cert) != bool(arguments.key):
         raise ValueError("--cert and --key must be supplied together")
-    if arguments.language and not re.fullmatch(LANGUAGE_PATTERN, arguments.language):
-        raise ValueError("invalid transcription language")
     service = RecognitionService(
         arguments.language, arguments.model_directory, arguments.speech_model
     )

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from src.config.live import MAXIMUM_SESSIONS, SESSION_ID_PATTERN, SESSION_IDLE_SECONDS
-from src.core.audio.realtime import StreamingTranscriber
+from src.core.audio.realtime import MultilingualTranscriber, StreamingTranscriber
 from src.core.tracking.realtime import RealtimeTracker
 from src.core.tracking.voice import SpeechBuffer
 from src.core.vision.live import LiveFaceDetector
@@ -24,11 +24,11 @@ class LiveSession:
     tracker: RealtimeTracker = field(default_factory=RealtimeTracker)
     detector: LiveFaceDetector | None = None
     audio_lock: threading.Lock = field(default_factory=threading.Lock)
-    speech_model: object | None = None
-    transcriber: StreamingTranscriber | None = None
+    speech_models: dict[str, object] = field(default_factory=dict)
+    transcriber: StreamingTranscriber | MultilingualTranscriber | None = None
     audio_finished: bool = False
     received_until: float = 0.0
-    language: str | None = None
+    languages: tuple[str, ...] = ()
     last_job_id: str | None = None
     last_result: dict | None = None
     touched_at: float = field(default_factory=time.monotonic)

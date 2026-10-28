@@ -12,6 +12,8 @@ from PIL import Image
 
 from src.config.live import (
     FACE_CROP_PADDING_RATIO,
+    IDENTITY_REFRESH_SECONDS,
+    IDENTITY_REUSE_IOU,
     LEFT_EYE_KEYPOINT,
     LIVE_FACE_DETECTION_CONFIDENCE,
     MAXIMUM_FRAME_HEIGHT,
@@ -30,7 +32,7 @@ from src.config.models import MODEL_DIRECTORY
 from src.config.vision import FACE_DETECTION_MODEL
 from src.core.contracts import FaceBox, FaceObservation
 from src.core.vision.face_identity import face_identity_encoder
-from src.core.vision.faces import detection_box
+from src.core.vision.faces import detection_box, intersection_over_union
 
 
 class LiveFaceDetector:
@@ -38,6 +40,7 @@ class LiveFaceDetector:
 
     def __init__(self, model_directory: Path = MODEL_DIRECTORY) -> None:
         self.lock = threading.Lock()
+        self.previous: list[tuple[FaceBox, float]] = []
         self.identity_encoder = face_identity_encoder(model_directory)
         self.detector = mediapipe.solutions.face_detection.FaceDetection(
             model_selection=FACE_DETECTION_MODEL,
@@ -69,6 +72,7 @@ class LiveFaceDetector:
         if image is None:
             raise ValueError("frame must be a decodable image")
         observations = []
+        current = []
         with self.lock:
             detections = (
                 self.detector.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).detections
@@ -102,6 +106,7 @@ class LiveFaceDetector:
                 result = self.model.process(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
                 aperture = None
                 features = None
+                feature_time = -math.inf
                 if result.multi_face_landmarks:
                     landmarks = result.multi_face_landmarks[0].landmark
                     _, aperture = face_observation(
@@ -110,14 +115,33 @@ class LiveFaceDetector:
                         right - left,
                         bottom - top,
                     )
-                    features = self.identity_encoder.encode(crop, landmarks)
+                    feature_time = identity_feature_time(box, self.previous, timestamp)
+                    if feature_time is None:
+                        features = self.identity_encoder.encode(crop, landmarks)
+                        feature_time = timestamp
                 observations.append(FaceObservation(box, aperture, features))
+                current.append((box, feature_time))
+            self.previous = current
         return width, height, observations
 
     def close(self) -> None:
         with self.lock:
             self.model.close()
             self.detector.close()
+
+
+def identity_feature_time(
+    box: FaceBox, previous: list[tuple[FaceBox, float]], timestamp: float
+) -> float | None:
+    """Return the earlier feature time to keep, or None when features are needed."""
+    matches = [
+        feature_time
+        for earlier, feature_time in previous
+        if intersection_over_union(box, earlier) >= IDENTITY_REUSE_IOU
+    ]
+    if len(matches) == 1 and timestamp - matches[0] < IDENTITY_REFRESH_SECONDS:
+        return matches[0]
+    return None
 
 
 def face_roll_degrees(detection, width: int, height: int) -> float:

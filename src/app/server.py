@@ -21,7 +21,6 @@ from src.config.live import (
     AUDIO_WORKLET_PATH,
     CLIENT_PATH,
     END_SESSION_PATH,
-    LANGUAGE_PATTERN,
     MAXIMUM_AUDIO_ACTIVITY_SECONDS,
     MAXIMUM_FRAME_BYTES,
     MAXIMUM_SESSION_SECONDS,
@@ -31,6 +30,7 @@ from src.config.live import (
     START_SESSION_PATH,
     TRACKING_PATH,
 )
+from src.core.audio.language import parse_languages
 
 LOGGER = logging.getLogger(__name__)
 STATIC_ASSETS = {
@@ -154,8 +154,8 @@ class LiveRequestHandler(BaseHTTPRequestHandler):
 
     def _language(self) -> str | None:
         language = self.headers.get("X-Whisper-Language") or None
-        if language and not re.fullmatch(LANGUAGE_PATTERN, language):
-            raise ValueError("invalid transcription language")
+        if language:
+            parse_languages(language, self.server.service.custom_model)
         return language
 
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:

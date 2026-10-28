@@ -1,10 +1,9 @@
 const cameraSelect = document.querySelector("#camera-select");
 const languageSelect = document.querySelector("#language");
-const startButton = document.querySelector("#start");
-const stopButton = document.querySelector("#stop");
+const toggleButton = document.querySelector("#toggle");
 const retryButton = document.querySelector("#retry");
-const transcriptToggle = document.querySelector("#transcript-toggle");
-const transcriptPanel = document.querySelector("#transcript-panel");
+const languageChips = document.querySelector("#language-chips");
+const languageHint = document.querySelector("#language-hint");
 const frameCanvas = document.createElement("canvas");
 let sessionStartedAt = 0;
 const sessionSeconds = () => (performance.now() - sessionStartedAt) / 1000;
@@ -31,22 +30,132 @@ let audioTimer;
 let trackingTimer;
 let closingSession = false;
 let finalAudioSent = false;
+let phase = "idle";
+const MEDIA_TIMEOUT_MILLISECONDS = 15000;
+
+// macOS can leave getUserMedia pending forever (for example behind an
+// unanswered privacy prompt); fail visibly and release a late stream.
+function requestMedia(constraints) {
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(
+        new Error(
+          "The camera or microphone did not respond. Check System Settings › Privacy & Security, close other apps using the camera, then start again.",
+        ),
+      );
+    }, MEDIA_TIMEOUT_MILLISECONDS);
+    navigator.mediaDevices.getUserMedia(constraints).then(
+      (media) => {
+        clearTimeout(timer);
+        if (timedOut) media.getTracks().forEach((track) => track.stop());
+        else resolve(media);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function setPhase(next) {
+  phase = next;
+  renderer.setPhase(next);
+  const labels = {
+    idle: ["Start", "Start captioning"],
+    loading: ["Starting…", "Starting, preparing speech models"],
+    running: ["Stop", "Stop captioning"],
+    stopping: ["Stopping…", "Stopping, finishing retained speech"],
+  };
+  const [text, label] = labels[next];
+  toggleButton.textContent = text;
+  toggleButton.setAttribute("aria-label", label);
+  toggleButton.setAttribute("data-state", next);
+  toggleButton.disabled = next === "loading" || next === "stopping";
+  languageSelect.disabled = next !== "idle";
+  cameraSelect.disabled = next !== "idle";
+  syncChips();
+}
+
+const selectedLanguages = () =>
+  [...languageSelect.options]
+    .filter((option) => option.selected)
+    .map((option) => option.value);
+const selectLanguages = (languages) => {
+  for (const option of languageSelect.options)
+    option.selected = languages.includes(option.value);
+  syncChips();
+};
+const chips = [];
+function syncChips() {
+  for (const chip of chips) {
+    const selected = selectedLanguages().includes(chip.language);
+    chip.setAttribute("aria-pressed", String(selected));
+    chip.disabled = phase !== "idle";
+  }
+}
+function showLanguageHint(message) {
+  languageHint.textContent = message;
+  setTimeout(() => {
+    if (languageHint.textContent === message) languageHint.textContent = "";
+  }, 3500);
+}
 
 if (configuration.language) {
-  if (
-    ![...languageSelect.options].some(
-      (option) => option.value === configuration.language,
-    )
-  )
-    languageSelect.add(
-      new Option(configuration.language, configuration.language),
-    );
-  languageSelect.value = configuration.language;
+  const configured = configuration.language.split(",");
+  for (const language of configured)
+    if (![...languageSelect.options].some((option) => option.value === language))
+      languageSelect.add(new Option(language, language));
+  selectLanguages(configured);
 } else {
   const locale = navigator.language.split("-")[0].toLowerCase();
   if ([...languageSelect.options].some((option) => option.value === locale))
-    languageSelect.value = locale;
+    selectLanguages([locale]);
 }
+let chosenLanguages = selectedLanguages();
+languageSelect.onchange = () => {
+  const languages = selectedLanguages();
+  if (
+    languages.length === 0 ||
+    languages.length > configuration.maximumSessionLanguages
+  ) {
+    selectLanguages(chosenLanguages);
+    showLanguageHint(
+      `Choose between 1 and ${configuration.maximumSessionLanguages} languages.`,
+    );
+    return;
+  }
+  chosenLanguages = languages;
+  syncChips();
+};
+const languageNames = {
+  en: "English",
+  it: "Italiano",
+  es: "Español",
+  fr: "Français",
+  de: "Deutsch",
+};
+for (const option of languageSelect.options) {
+  const chip = document.createElement("button");
+  chip.className = "chip";
+  chip.language = option.value;
+  chip.textContent = option.value.toUpperCase();
+  chip.setAttribute("title", languageNames[option.value] || option.value);
+  chip.setAttribute(
+    "aria-label",
+    languageNames[option.value] || option.value.toUpperCase(),
+  );
+  chip.onclick = () => {
+    if (phase !== "idle") return;
+    option.selected = !option.selected;
+    languageSelect.onchange();
+  };
+  chips.push(chip);
+}
+languageChips.replaceChildren(...chips);
+syncChips();
 
 async function post(
   path,
@@ -94,7 +203,7 @@ function receiveAudio(message, captureGeneration, origin) {
   try {
     audioBuffer.append(message.samples, offset);
   } catch (error) {
-    renderer.setStatus(error.message);
+    renderer.setStatus(error.message, true);
     stopCamera();
     return;
   }
@@ -113,6 +222,7 @@ function receiveAudio(message, captureGeneration, origin) {
     stopCamera();
     renderer.setStatus(
       "Capture paused: the audio decoder cannot keep up. Retained speech is finishing.",
+      true,
     );
   }
 }
@@ -141,6 +251,7 @@ async function drainActivity() {
   } catch (error) {
     renderer.setStatus(
       `Audio activity unavailable: ${error.message}. Captions continue.`,
+      true,
     );
   } finally {
     activityUploading = false;
@@ -177,7 +288,7 @@ async function drainAudio() {
     job: ++nextJob,
     sessionId,
     generation,
-    language: languageSelect.value,
+    language: selectedLanguages().join(","),
   };
   retainedAudio = item;
   audioUploading = true;
@@ -218,6 +329,7 @@ async function drainAudio() {
     stopCamera();
     renderer.setStatus(
       `Speech retained: ${error.message}. Choose Retry recognition.`,
+      true,
     );
   } finally {
     audioUploading = false;
@@ -259,6 +371,7 @@ async function trackCurrentFrame(captureGeneration) {
   } catch (error) {
     renderer.setStatus(
       `Camera detection unavailable: ${error.message}. Microphone captions continue.`,
+      true,
     );
   } finally {
     visualUploading = false;
@@ -290,22 +403,24 @@ async function startCamera() {
     throw new Error(
       "This browser requires secure microphone access and AudioWorklet support.",
     );
-  startButton.disabled = true;
+  setPhase("loading");
   try {
     sessionId = crypto.randomUUID();
     renderer.setStatus("Preparing the selected speech language…");
     const ready = await post("/start", "", 0, {
-      "X-Whisper-Language": languageSelect.value,
+      "X-Whisper-Language": selectedLanguages().join(","),
     });
     if (!ready) throw new Error("Speech model is busy. Try starting again.");
     audioContext = new AudioContext({ latencyHint: "interactive" });
     await audioContext.resume();
     await audioContext.audioWorklet.addModule("/audio-worklet.js");
-    stream = await navigator.mediaDevices.getUserMedia({
+    renderer.setStatus("Waiting for the camera and microphone…");
+    stream = await requestMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
+        autoGainControl: true,
       },
       video: {
         width: { ideal: configuration.maximumFrameWidth },
@@ -328,6 +443,7 @@ async function startCamera() {
     retainedAudio = undefined;
     failedAudio = undefined;
     renderer.reset();
+    renderer.multilingual = ready.languages.length > 1;
     renderer.capturing = true;
     microphoneSource = audioContext.createMediaStreamSource(stream);
     microphoneNode = new AudioWorkletNode(audioContext, "microphone-pcm", {
@@ -351,9 +467,7 @@ async function startCamera() {
       .connect(microphoneNode)
       .connect(silentOutput)
       .connect(audioContext.destination);
-    stopButton.disabled = false;
-    languageSelect.disabled = true;
-    cameraSelect.disabled = true;
+    setPhase("running");
     scheduleAudio();
     trackCurrentFrame(captureGeneration);
     renderer.setStatus(
@@ -369,7 +483,7 @@ async function startCamera() {
     try {
       await post("/end", "", 0);
     } catch {}
-    startButton.disabled = false;
+    setPhase("idle");
     throw error;
   }
 }
@@ -379,7 +493,7 @@ async function stopCamera() {
   capturing = false;
   stopping = true;
   renderer.capturing = false;
-  stopButton.disabled = true;
+  setPhase("stopping");
   clearTimeout(trackingTimer);
   if (microphoneNode) {
     await new Promise((resolve) => {
@@ -420,22 +534,22 @@ async function finishCapture() {
       setTimeout(finishCapture, configuration.retryMilliseconds);
       return;
     }
-    startButton.disabled = false;
-    languageSelect.disabled = false;
-    cameraSelect.disabled = false;
+    setPhase("idle");
     stopping = false;
     renderer.setStatus("Capture stopped. All retained speech has finished.");
   } catch (error) {
     closingSession = false;
-    renderer.setStatus(error.message);
+    renderer.setStatus(error.message, true);
     setTimeout(finishCapture, configuration.retryMilliseconds);
   }
 }
 
-startButton.onclick = () =>
-  startCamera().catch((error) => renderer.setStatus(error.message));
-stopButton.onclick = () =>
-  stopCamera().catch((error) => renderer.setStatus(error.message));
+toggleButton.onclick = () => {
+  if (phase === "idle")
+    startCamera().catch((error) => renderer.setStatus(error.message, true));
+  else if (phase === "running")
+    stopCamera().catch((error) => renderer.setStatus(error.message, true));
+};
 retryButton.onclick = () => {
   if (!failedAudio) return;
   retainedAudio = failedAudio;
@@ -443,11 +557,5 @@ retryButton.onclick = () => {
   retryButton.hidden = true;
   scheduleAudio(0);
 };
-transcriptToggle.onclick = () => {
-  const collapsed = transcriptPanel.classList.toggle("collapsed");
-  transcriptToggle.setAttribute("aria-expanded", String(!collapsed));
-  transcriptToggle.textContent = collapsed
-    ? "Show transcript"
-    : "Collapse transcript";
-};
+setPhase("idle");
 renderer.render();

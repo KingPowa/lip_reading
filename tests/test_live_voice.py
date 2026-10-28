@@ -6,9 +6,10 @@ from src.config.live import SPEAKER_HOLD_SECONDS
 from src.config.tracking import (
     VOICE_BIND_MIN_CONFIRMATIONS,
     VOICE_MERGE_MIN_CONFIRMATIONS,
+    VOICE_STICKY_MAXIMUM_SECONDS,
     VOICE_VALIDITY_SECONDS,
 )
-from src.core.contracts import FaceBox
+from src.core.contracts import FaceBox, Word
 from src.core.tracking.realtime import RealtimeTracker
 
 PEOPLE = np.eye(4, dtype=np.float32)
@@ -54,14 +55,29 @@ class VoiceTrackingTest(unittest.TestCase):
                 self.tick(*self.pair(speaker))
             self.voice_window(voice)
 
+    def settle(self, seconds=15.0):
+        """Silent, still faces so earlier speaking evidence decays away."""
+        for _ in range(round(seconds * 10)):
+            self.tick(*self.pair("none"), speaking=False)
+
     def teach_both(self):
         self.teach("a", 0)
+        self.settle()
         self.teach("b", 1)
+        self.settle()
 
     def test_voice_binds_only_after_enough_clear_single_speaker_windows(self):
         self.teach("a", 0, windows=VOICE_BIND_MIN_CONFIRMATIONS - 1)
         self.assertIsNone(self.tracker.voices.face_for("voice-1"))
         self.teach("a", 0, windows=1)
+        self.assertEqual(self.tracker.voices.face_for("voice-1"), "face-1")
+
+    def test_soft_speaker_with_subtle_mouth_motion_binds_a_voice(self):
+        for _ in range(VOICE_BIND_MIN_CONFIRMATIONS + 2):
+            for _ in range(10):
+                soft = 0.04 if self.step % 2 else 0.02
+                estimate = self.tick((0, 20, soft), (1, 200, 0.02))
+            self.voice_window(0)
         self.assertEqual(self.tracker.voices.face_for("voice-1"), "face-1")
 
     def test_voice_is_not_bound_from_competing_or_carried_over_estimates(self):
@@ -79,14 +95,14 @@ class VoiceTrackingTest(unittest.TestCase):
 
     def test_current_voice_breaks_a_tie_between_equally_moving_mouths(self):
         self.teach_both()
-        for _ in range(round(VOICE_VALIDITY_SECONDS * 10) + 8):
+        for _ in range(round(VOICE_STICKY_MAXIMUM_SECONDS * 10) + 8):
             estimate = self.tick(*self.pair("both"))
         self.assertEqual(estimate.state, "uncertain")
         self.voice_window(1)
         for _ in range(5):
             estimate = self.tick(*self.pair("both"))
         self.assertEqual((estimate.state, estimate.speaker), ("visible", "Person 2"))
-        for _ in range(round(VOICE_VALIDITY_SECONDS * 10) + 8):
+        for _ in range(round(VOICE_STICKY_MAXIMUM_SECONDS * 10) + 8):
             estimate = self.tick(*self.pair("both"))
         self.assertEqual(estimate.state, "uncertain")
 
@@ -108,6 +124,93 @@ class VoiceTrackingTest(unittest.TestCase):
             (estimate.speaker, estimate.state, estimate.face_track),
             ("Person 1", "off_screen", None),
         )
+
+    def leave(self, ticks=15):
+        """Person 1 walks off; Person 2 stays visible but silent."""
+        for _ in range(ticks):
+            estimate = self.tick((1, 200, 0.02))
+        return estimate
+
+    def ambiguous_window(self, voice=0):
+        vector = np.zeros(3, dtype=np.float32)
+        vector[voice], vector[2] = 0.4, 0.9
+        return self.tracker.update_voice(vector, self.now - 0.9, self.now)
+
+    def test_ambiguous_windows_keep_an_absent_persons_label(self):
+        self.teach_both()
+        self.leave()
+        self.assertEqual(self.ambiguous_window(), "voice-1")
+        self.assertEqual(len(self.tracker.voices.centroids), 2)
+        estimate = self.tick((1, 200, 0.02))
+        self.assertEqual(
+            (estimate.speaker, estimate.state, estimate.face_track),
+            ("Person 1", "off_screen", None),
+        )
+
+    def test_label_persists_across_a_gap_in_continuous_speech_then_expires(self):
+        self.teach_both()
+        self.leave()
+        self.ambiguous_window()
+        for _ in range(round(VOICE_VALIDITY_SECONDS * 10) + 8):
+            estimate = self.tick((1, 200, 0.02))
+        self.assertEqual(estimate.speaker, "Person 1")
+        for _ in range(4):
+            self.tick((1, 200, 0.02), speaking=False)
+        for _ in range(round(VOICE_VALIDITY_SECONDS * 10) + 2):
+            estimate = self.tick((1, 200, 0.02))
+        self.assertEqual((estimate.speaker, estimate.state), ("Off-screen speaker", "off_screen"))
+
+    def test_sticky_label_ends_after_the_maximum_even_in_continuous_speech(self):
+        self.teach_both()
+        self.leave()
+        self.ambiguous_window()
+        for _ in range(round(VOICE_STICKY_MAXIMUM_SECONDS * 10) + 3):
+            estimate = self.tick((1, 200, 0.02))
+        self.assertEqual(estimate.speaker, "Off-screen speaker")
+
+    def test_unmeasured_visible_face_does_not_block_the_absent_label(self):
+        self.teach_both()
+        self.leave()
+        self.ambiguous_window()
+        estimate = self.tick((1, 200, None))
+        self.assertEqual(
+            (estimate.speaker, estimate.state, estimate.face_track),
+            ("Person 1", "off_screen", None),
+        )
+
+    def test_voice_match_relabels_earlier_generic_off_screen_captions(self):
+        self.teach_both()
+        self.leave()
+        self.assertEqual(self.tracker.speaker_history[-1].speaker, "Off-screen speaker")
+        before = self.tracker.revision
+        self.voice_window(0)
+        events = self.tracker.caption_events([Word("hi", self.now - 0.3, self.now - 0.1, 1.0)])
+        self.assertEqual((events[0].speaker, events[0].state), ("Person 1", "off_screen"))
+        self.assertGreater(self.tracker.revision, before)
+        self.assertIsNone(events[0].face_track)
+
+    def test_relabel_leaves_visible_and_uncertain_entries_alone(self):
+        self.teach_both()
+        for _ in range(10):
+            self.tick(*self.pair("both"))
+        self.leave(45)
+        kept = [
+            item for item in self.tracker.speaker_history
+            if item.state in ("visible", "uncertain")
+        ]
+        generic = [
+            item for item in self.tracker.speaker_history
+            if item.speaker == "Off-screen speaker"
+        ]
+        self.assertTrue(kept and generic)
+        self.voice_window(0)
+        history = list(self.tracker.speaker_history)
+        self.assertTrue(all(item in history for item in kept))
+        inside = [item for item in generic if item.timestamp >= self.now - 0.9]
+        outside = [item for item in generic if item.timestamp < self.now - 0.9]
+        self.assertTrue(inside and outside)
+        self.assertTrue(all(item not in history for item in inside))
+        self.assertTrue(all(item in history for item in outside))
 
     def test_unknown_or_unbound_voice_stays_off_screen(self):
         self.teach_both()
@@ -148,6 +251,23 @@ class VoiceTrackingTest(unittest.TestCase):
         )
         self.assertEqual(self.tracker.labels["face-1"], labels["face-1"])
         self.assertNotEqual(estimate.speaker, "Person 3")
+
+    def test_merge_carries_speaking_evidence_to_the_inherited_identity(self):
+        self.teach_both()
+        for _ in range(10):
+            self.tick((1, 200, 0.02))
+        for _ in range(4):
+            self.tick((1, 200, 0.02), (2, 400, self.talk()))
+        self.assertGreater(self.tracker.speaking_evidence["face-3"], 0.0)
+        pending = self.tracker.speaking_evidence["face-3"]
+        self.assertNotIn("face-1", self.tracker.speaking_evidence)
+        self.tracker.update_voice(VOICES[0], self.now - 0.9, self.now)
+        self.tick((1, 200, 0.02), (2, 400, self.talk()))
+        self.tracker.update_voice(VOICES[0], self.now - 0.9, self.now)
+        self.assertEqual(self.tracker.merge_count, 1)
+        self.assertNotIn("face-3", self.tracker.speaking_evidence)
+        self.assertNotIn("face-3", self.tracker.evidence_times)
+        self.assertGreater(self.tracker.speaking_evidence["face-1"], pending)
 
     def test_merge_needs_consecutive_agreeing_segments(self):
         self.teach_both()

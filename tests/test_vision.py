@@ -12,6 +12,18 @@ from src.core.vision.faces import _track_detections, analyze_faces
 
 
 class VisionTest(unittest.TestCase):
+    def test_identity_features_are_reused_only_for_one_stable_recent_box(self) -> None:
+        from src.core.vision.live import identity_feature_time
+
+        box = FaceBox(1.0, 100, 100, 100, 100)
+        previous = [(FaceBox(0.9, 102, 100, 100, 100), 0.5)]
+        self.assertEqual(identity_feature_time(box, previous, 1.2), 0.5)
+        self.assertIsNone(identity_feature_time(box, previous, 1.5))
+        self.assertIsNone(identity_feature_time(FaceBox(1.0, 300, 100, 100, 100), previous, 1.2))
+        self.assertIsNone(identity_feature_time(box, [], 1.2))
+        twin = (FaceBox(0.9, 98, 100, 100, 100), 0.5)
+        self.assertIsNone(identity_feature_time(box, previous + [twin], 1.2))
+
     def test_live_detector_reuses_model_and_tracks_clipped_boxes_without_downloads(
         self,
     ) -> None:

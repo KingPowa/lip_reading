@@ -22,11 +22,20 @@ MAXIMUM_VOICES = 16
 MAXIMUM_VOICE_WEIGHT_COUNT = 20
 VOICE_BIND_MIN_CONFIRMATIONS = 3
 VOICE_BIND_DOMINANCE_RATIO = 2.0
-VOICE_BIND_MIN_CONFIDENCE = 0.8
+CLEAR_SPEAKER_RATIO = 2.0
 VOICE_BIND_MIN_SAMPLES = 5
 VOICE_BIND_DOMINANT_FRACTION = 0.7
 VOICE_MATCH_BONUS = 0.05
 VOICE_VALIDITY_SECONDS = 1.5
+VOICE_STICKY_MAXIMUM_SECONDS = 4.0
+VOICE_IDENTIFY_THRESHOLD = 0.35
+VOICE_IDENTIFY_MARGIN = 0.05
 VOICE_FALLBACK_CONFIDENCE = 0.5
 VOICE_MERGE_MIN_CONFIRMATIONS = 2
 MAXIMUM_VOICE_TIMELINE = 64
+
+# Voice-majority turns: a voice backed by this much face evidence names the whole utterance,
+# because listeners' mouth jitter wins single frames but not a session of votes.
+VOICE_TURN_MIN_SECONDS = 8.0
+VOICE_TURN_LEAD = 2.0  # top face vs runner-up; crowds spread jitter votes over many listeners
+VOICE_TURN_SINGLE_VOICE_SHARE = 0.7  # below this the utterance's voices point to different faces; keep the split logic

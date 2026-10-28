@@ -19,7 +19,16 @@ from src.config.live import (
 )
 from src.config.streaming import SAMPLE_TIMESTAMP_TOLERANCE
 from src.core.audio.models import SpeechModelStore
-from src.core.audio.realtime import StreamingTranscriber, decode_pcm
+from src.core.audio.language import (
+    LanguageIdentifier,
+    load_language_identifier,
+    parse_languages,
+)
+from src.core.audio.realtime import (
+    MultilingualTranscriber,
+    StreamingTranscriber,
+    decode_pcm,
+)
 from src.core.audio.speech import embed_samples, warm_up_speaker_model
 from src.core.vision.live import LiveFaceDetector
 
@@ -33,19 +42,26 @@ class RecognitionService:
         model_directory: Path,
         speech_model: Path | None = None,
     ) -> None:
-        self.language = language
+        self.languages = parse_languages(language, speech_model is not None)
+        self.language = ",".join(self.languages) or None
+        self.custom_model = speech_model is not None
         self.model_directory = model_directory
         self.registry = SessionRegistry()
         self.models = SpeechModelStore(model_directory, speech_model)
+        self.identifier: LanguageIdentifier | None = None
+        self.identifier_lock = threading.Lock()
+        self.identifier_attempted = False
         self.speaker_classifier: object | None = None
         self.voice_executor: ThreadPoolExecutor | None = None
 
     def warm_up(self) -> None:
         cv2.setNumThreads(LIVE_OPENCV_THREADS)
-        model = self.models.load(self.language or DEFAULT_LANGUAGE)
-        StreamingTranscriber(model, 0).accept(
-            np.zeros(AUDIO_SAMPLE_RATE, dtype="<i2").tobytes(), True
-        )
+        languages = self.languages or (DEFAULT_LANGUAGE,)
+        for language in languages:
+            StreamingTranscriber(self.models.load(language), 0).accept(
+                np.zeros(AUDIO_SAMPLE_RATE, dtype="<i2").tobytes(), True
+            )
+        self._load_identifier(languages)
         self._warm_up_voice()
         detector = None
         try:
@@ -75,19 +91,34 @@ class RecognitionService:
         if self.voice_executor is None:
             self.voice_executor = ThreadPoolExecutor(max_workers=1)
 
+    def _load_identifier(self, languages: tuple[str, ...]) -> None:
+        """Load the shared language-ID model once, only for multilingual use."""
+        if len(languages) < 2:
+            return
+        with self.identifier_lock:
+            if not self.identifier_attempted:
+                self.identifier_attempted = True
+                self.identifier = load_language_identifier(self.model_directory)
+
+    def _session_languages(self, language: str | None) -> tuple[str, ...]:
+        requested = parse_languages(language, self.custom_model)
+        return requested or self.languages or (DEFAULT_LANGUAGE,)
+
     def start_session(self, session_id: str, language: str | None) -> dict:
-        effective_language = language or self.language or DEFAULT_LANGUAGE
+        languages = self._session_languages(language)
         with self.registry.use(session_id) as session:
-            model = self.models.load(effective_language)
+            models = {name: self.models.load(name) for name in languages}
+            self._load_identifier(languages)
             with session.lock:
-                if (
-                    session.language is not None
-                    and session.language != effective_language
-                ):
+                if session.languages and session.languages != languages:
                     raise ValueError("start a new capture session to change language")
-                session.language = effective_language
-                session.speech_model = model
-        return {"sessionId": session_id, "language": effective_language}
+                session.languages = languages
+                session.speech_models = models
+        return {
+            "sessionId": session_id,
+            "languages": list(languages),
+            "language": languages[0],
+        }
 
     def update_activity(
         self, content: bytes, session_id: str, timestamp: float
@@ -104,7 +135,7 @@ class RecognitionService:
         executor = self.voice_executor
         if executor is None:
             return
-        session.speech_buffer.add(samples, timestamp)
+        session.speech_buffer.add(samples, timestamp, session.tracker.speaking)
         if session.voice_job_active or not session.speech_buffer.ready():
             return
         window = session.speech_buffer.take()
@@ -176,17 +207,18 @@ class RecognitionService:
             try:
                 if job_id == session.last_job_id:
                     return session.last_result
-                if session.speech_model is None:
+                if not session.speech_models:
                     raise ValueError(
                         "prepare the speech language with /start before capture"
                     )
-                if language and language != session.language:
+                requested = parse_languages(language, self.custom_model)
+                if requested and requested != session.languages:
                     raise ValueError("start a new capture session to change language")
                 if session.audio_finished:
                     raise ValueError("audio stream has already finished")
                 if session.transcriber is None:
-                    session.transcriber = StreamingTranscriber(
-                        session.speech_model, capture_offset
+                    session.transcriber = self._build_transcriber(
+                        session, capture_offset
                     )
                     session.received_until = capture_offset
                 if (
@@ -211,12 +243,23 @@ class RecognitionService:
                         "acknowledgedUntil": capture_end,
                         "events": [caption_payload(event) for event in events],
                         "provisionalText": update.partial_text,
+                        "language": update.language or session.languages[0],
                         "timings": {"transcription": time.perf_counter() - started},
                     }
                     session.last_result = result
                 return result
             finally:
                 session.audio_lock.release()
+
+    def _build_transcriber(
+        self, session: LiveSession, origin: float
+    ) -> StreamingTranscriber | MultilingualTranscriber:
+        if len(session.languages) == 1:
+            return StreamingTranscriber(
+                session.speech_models[session.languages[0]], origin
+            )
+        identify = self.identifier.probabilities if self.identifier else None
+        return MultilingualTranscriber(session.speech_models, origin, identify)
 
     def close_session(self, session_id: str) -> None:
         self.registry.end(session_id)

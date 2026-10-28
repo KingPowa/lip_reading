@@ -8,7 +8,6 @@ from src.config.live import (
     AUDIO_SAMPLE_RATE,
     LIVE_VOICE_WINDOW_SECONDS,
     MAXIMUM_VOICE_BUFFER_SECONDS,
-    MINIMUM_SPEECH_ENERGY,
     VOICE_GAP_RESET_SECONDS,
 )
 from src.config.tracking import (
@@ -17,6 +16,8 @@ from src.config.tracking import (
     MINIMUM_FEATURE_NORM,
     VOICE_BIND_DOMINANCE_RATIO,
     VOICE_BIND_MIN_CONFIRMATIONS,
+    VOICE_IDENTIFY_MARGIN,
+    VOICE_IDENTIFY_THRESHOLD,
     VOICE_MATCH_MARGIN,
     VOICE_MATCH_THRESHOLD,
     VOICE_NEW_THRESHOLD,
@@ -63,6 +64,29 @@ class VoiceGallery:
         self.evidence[voice] = Counter()
         return voice
 
+    def identify(self, embedding: np.ndarray) -> str | None:
+        """Read-only: the clearly best face-bound voice, never updating anything."""
+        vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        magnitude = float(np.linalg.norm(vector))
+        if not np.isfinite(vector).all() or magnitude < MINIMUM_FEATURE_NORM:
+            return None
+        vector = vector / magnitude
+        ranked = sorted(
+            (
+                (float(np.dot(vector, centroid)), voice)
+                for voice, centroid in self.centroids.items()
+                if centroid.shape == vector.shape
+            ),
+            reverse=True,
+        )
+        bound = [item for item in ranked if self.face_for(item[1]) is not None]
+        if not bound or bound[0][0] < VOICE_IDENTIFY_THRESHOLD:
+            return None
+        best = bound[0]
+        others = [score for score, voice in ranked if voice != best[1]]
+        lead = best[0] - (others[0] if others else 0.0)
+        return best[1] if lead >= VOICE_IDENTIFY_MARGIN else None
+
     def bind(self, voice: str, face: str) -> None:
         if voice in self.evidence:
             self.evidence[voice][face] += 1
@@ -99,8 +123,8 @@ class SpeechBuffer:
     def __init__(self) -> None:
         self.chunks: deque[tuple[float, float, np.ndarray]] = deque()
 
-    def add(self, samples: np.ndarray, timestamp: float) -> None:
-        if float(np.sqrt(np.mean(samples * samples))) < MINIMUM_SPEECH_ENERGY:
+    def add(self, samples: np.ndarray, timestamp: float, speaking: bool) -> None:
+        if not speaking:
             return
         start = timestamp - len(samples) / AUDIO_SAMPLE_RATE
         if self.chunks and start - self.chunks[-1][1] > VOICE_GAP_RESET_SECONDS:

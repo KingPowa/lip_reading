@@ -62,13 +62,51 @@ class VoiceGalleryTest(unittest.TestCase):
         self.assertIsNone(self.gallery.voice_for("face-1"))
 
 
+class VoiceIdentifyTest(unittest.TestCase):
+    def setUp(self):
+        self.gallery = VoiceGallery()
+        self.voice = self.gallery.assign(unit(1, 0, 0))
+        self.other = self.gallery.assign(unit(0, 1, 0))
+
+    def bind(self, voice, face):
+        for _ in range(VOICE_BIND_MIN_CONFIRMATIONS):
+            self.gallery.bind(voice, face)
+
+    def snapshot(self):
+        return (
+            {key: value.copy() for key, value in self.gallery.centroids.items()},
+            dict(self.gallery.counts),
+            self.gallery.next_voice,
+        )
+
+    def test_ambiguous_embedding_identifies_a_bound_voice_without_mutation(self):
+        self.bind(self.voice, "face-1")
+        ambiguous = unit(0.4, 0, 0.9)
+        self.assertIsNone(self.gallery.assign(ambiguous))
+        before = self.snapshot()
+        self.assertEqual(self.gallery.identify(ambiguous), self.voice)
+        after = self.snapshot()
+        self.assertEqual(before[1:], after[1:])
+        for key, value in before[0].items():
+            np.testing.assert_array_equal(value, after[0][key])
+
+    def test_unbound_weak_or_tied_voices_are_not_identified(self):
+        ambiguous = unit(0.4, 0, 0.9)
+        self.assertIsNone(self.gallery.identify(ambiguous))
+        self.bind(self.voice, "face-1")
+        self.assertIsNone(self.gallery.identify(unit(0.2, 0, 0.98)))
+        self.assertIsNone(self.gallery.identify(unit(0.4, 0.4, 0.8)))
+        self.assertIsNone(self.gallery.identify(np.zeros(3)))
+        self.assertEqual(len(self.gallery.centroids), 2)
+
+
 class SpeechBufferTest(unittest.TestCase):
     def packet(self, level):
         return np.full(1600, level, dtype=np.float32)
 
     def fill(self, buffer, start_step, steps, level=0.05):
         for step in range(start_step, start_step + steps):
-            buffer.add(self.packet(level), round(0.1 * (step + 1), 1))
+            buffer.add(self.packet(level), round(0.1 * (step + 1), 1), level > 0)
 
     def test_window_is_ready_after_enough_speech_and_returns_its_time_span(self):
         buffer = SpeechBuffer()
