@@ -225,3 +225,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 *.DS_Store*
+# Desktop app
+desktop/node_modules/
+desktop/dist/
+desktop/backend.json
+progress
+.codegraph
+.playwright-mcp
